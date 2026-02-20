@@ -1,0 +1,177 @@
+{
+  "id": "stimm-voice",
+  "name": "Stimm Voice",
+  "description": "Real-time voice conversations powered by Stimm dual-agent architecture",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "default": false,
+        "description": "Enable Stimm voice capabilities"
+      },
+      "livekit": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "type": "string",
+            "default": "ws://localhost:7880",
+            "description": "LiveKit server WebSocket URL"
+          },
+          "apiKey": {
+            "type": "string",
+            "default": "devkey",
+            "description": "LiveKit API key"
+          },
+          "apiSecret": {
+            "type": "string",
+            "description": "LiveKit API secret"
+          }
+        }
+      },
+      "voiceAgent": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "docker": {
+            "type": "boolean",
+            "default": true,
+            "description": "Run voice agent in Docker container"
+          },
+          "image": {
+            "type": "string",
+            "default": "ghcr.io/stimm-ai/stimm-agent:latest",
+            "description": "Docker image for the voice agent"
+          },
+          "stt": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "provider": {
+                "type": "string",
+                "enum": ["deepgram", "google", "openai"],
+                "default": "deepgram"
+              },
+              "model": {
+                "type": "string",
+                "default": "nova-2"
+              }
+            }
+          },
+          "tts": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "provider": {
+                "type": "string",
+                "enum": ["openai", "elevenlabs", "cartesia", "google"],
+                "default": "openai"
+              },
+              "model": {
+                "type": "string",
+                "default": "tts-1"
+              },
+              "voice": {
+                "type": "string",
+                "default": "alloy"
+              }
+            }
+          },
+          "llm": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "provider": {
+                "type": "string",
+                "default": "openai"
+              },
+              "model": {
+                "type": "string",
+                "default": "gpt-4o-mini"
+              }
+            }
+          },
+          "bufferingLevel": {
+            "type": "string",
+            "enum": ["NONE", "LOW", "MEDIUM", "HIGH"],
+            "default": "MEDIUM"
+          },
+          "mode": {
+            "type": "string",
+            "enum": ["autonomous", "relay", "hybrid"],
+            "default": "hybrid"
+          }
+        }
+      },
+      "web": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "Expose /voice web endpoint for browser voice sessions"
+          },
+          "path": {
+            "type": "string",
+            "default": "/voice"
+          }
+        }
+      }
+    }
+  },
+  "uiHints": {
+    "enabled": {
+      "label": "Enable Stimm Voice"
+    },
+    "livekit.url": {
+      "label": "LiveKit URL",
+      "placeholder": "ws://localhost:7880"
+    },
+    "livekit.apiKey": {
+      "label": "LiveKit API Key"
+    },
+    "livekit.apiSecret": {
+      "label": "LiveKit API Secret",
+      "sensitive": true
+    },
+    "voiceAgent.docker": {
+      "label": "Run in Docker",
+      "help": "Run the Python voice agent in a Docker container"
+    },
+    "voiceAgent.image": {
+      "label": "Voice Agent Docker Image",
+      "advanced": true
+    },
+    "voiceAgent.stt.provider": {
+      "label": "STT Provider"
+    },
+    "voiceAgent.tts.provider": {
+      "label": "TTS Provider"
+    },
+    "voiceAgent.tts.voice": {
+      "label": "TTS Voice"
+    },
+    "voiceAgent.llm.model": {
+      "label": "Fast LLM Model",
+      "help": "Small fast model for the voice agent (e.g. gpt-4o-mini)"
+    },
+    "voiceAgent.bufferingLevel": {
+      "label": "Buffering Level",
+      "advanced": true
+    },
+    "voiceAgent.mode": {
+      "label": "Voice Agent Mode",
+      "help": "autonomous: voice agent self-directs; relay: speaks supervisor text; hybrid: blends both"
+    },
+    "web.enabled": {
+      "label": "Enable Web Voice"
+    },
+    "web.path": {
+      "label": "Web Voice Path",
+      "advanced": true
+    }
+  }
+}
