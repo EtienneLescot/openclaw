@@ -3,7 +3,7 @@ import type { SupervisorDeps } from "./supervisor.js";
 import { OpenClawSupervisor } from "./supervisor.js";
 
 // ---------------------------------------------------------------------------
-// Mock @stimm/protocol — prevent real LiveKit connections.
+// Mock ./node-supervisor-client — prevent real LiveKit connections.
 // ---------------------------------------------------------------------------
 
 const mockInstruct = vi.fn();
@@ -14,9 +14,9 @@ const mockConnect = vi.fn();
 const mockDisconnect = vi.fn();
 let capturedHandlers: Record<string, Function> = {};
 
-vi.mock("@stimm/protocol", () => {
+vi.mock("./node-supervisor-client.js", () => {
   return {
-    StimmSupervisorClient: class FakeClient {
+    NodeSupervisorClient: class FakeClient {
       _connected = false;
 
       constructor(_opts: unknown) {}

@@ -26,10 +26,10 @@ vi.mock("livekit-server-sdk", () => {
   };
 });
 
-// Mock @stimm/protocol supervisor client (no LiveKit connection).
-vi.mock("@stimm/protocol", () => {
+// Mock node-supervisor-client (no LiveKit connection).
+vi.mock("./node-supervisor-client.js", () => {
   return {
-    StimmSupervisorClient: class FakeClient {
+    NodeSupervisorClient: class FakeClient {
       _connected = false;
       get connected() {
         return this._connected;
@@ -75,6 +75,7 @@ function createManager(depsOverride?: Partial<SupervisorDeps>) {
       llm: { provider: "openai", model: "gpt-4o-mini" },
       bufferingLevel: "MEDIUM" as const,
       mode: "hybrid" as const,
+      spawn: { autoSpawn: false, maxRestarts: 5 },
     },
     supervisorDeps: deps,
   });
