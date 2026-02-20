@@ -6,6 +6,7 @@
  * reasoning, tools, and context via the Stimm data-channel protocol.
  */
 
+import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { GatewayRequestHandlerOptions, OpenClawPluginApi } from "openclaw/plugin-sdk";
@@ -304,6 +305,8 @@ const stimmVoicePlugin = {
 
     // -- CLI ----------------------------------------------------------------
 
+    const extensionDir = resolve(dirname(api.source));
+
     api.registerCli(
       ({ program }) =>
         registerStimmVoiceCli({
@@ -311,6 +314,7 @@ const stimmVoicePlugin = {
           config,
           ensureRuntime,
           logger: api.logger,
+          extensionDir,
         }),
       { commands: ["voice"] },
     );
@@ -332,7 +336,6 @@ const stimmVoicePlugin = {
 
         // Auto-spawn the Python voice agent if configured.
         if (config.voiceAgent.spawn.autoSpawn) {
-          const extensionDir = resolve(dirname(api.source));
           const pythonPath =
             config.voiceAgent.spawn.pythonPath ||
             AgentProcess.resolveDefaultPythonPath(extensionDir);
@@ -413,15 +416,22 @@ const stimmVoicePlugin = {
               res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
             }
           } else {
-            // GET — return a minimal info page.
-            res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(
-              JSON.stringify({
-                plugin: "stimm-voice",
-                status: config.enabled ? "enabled" : "disabled",
-                hint: "POST to this endpoint to start a web voice session.",
-              }),
-            );
+            // GET — serve the voice web UI.
+            try {
+              const htmlPath = resolve(extensionDir, "src", "web", "voice.html");
+              const html = readFileSync(htmlPath, "utf-8");
+              res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+              res.end(html);
+            } catch {
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(
+                JSON.stringify({
+                  plugin: "stimm-voice",
+                  status: config.enabled ? "enabled" : "disabled",
+                  hint: "POST to this endpoint to start a web voice session.",
+                }),
+              );
+            }
           }
         },
       });
