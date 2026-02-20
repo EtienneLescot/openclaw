@@ -5,7 +5,7 @@
   "type": "module",
   "dependencies": {
     "@sinclair/typebox": "0.34.48",
-    "@stimm/protocol": "^0.1.0",
+    "@stimm/protocol": "link:../../../stimm/packages/protocol-ts",
     "livekit-server-sdk": "^2.0.0",
     "zod": "^4.3.6"
   },
