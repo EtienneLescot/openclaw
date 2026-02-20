@@ -11,6 +11,7 @@ bun.lockb
 coverage
 __openclaw_vitest__/
 __pycache__/
+.venv/
 *.pyc
 .tsbuildinfo
 .pnpm-store
