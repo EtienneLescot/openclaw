@@ -6,13 +6,13 @@
  * agent pipeline, and sends instructions back to the voice agent.
  */
 
-import { StimmSupervisorClient } from "@stimm/protocol";
 import type {
   TranscriptMessage,
   StateMessage,
   BeforeSpeakMessage,
   MetricsMessage,
 } from "@stimm/protocol";
+import { NodeSupervisorClient } from "./node-supervisor-client.js";
 
 export interface SupervisorDeps {
   /** Process a user message through the OpenClaw agent and return a text response. */
@@ -38,7 +38,7 @@ export interface SupervisorOptions {
  * the main agent, and sends instructions back to the voice agent.
  */
 export class OpenClawSupervisor {
-  private client: StimmSupervisorClient;
+  private client: NodeSupervisorClient;
   private deps: SupervisorDeps;
   private roomName: string;
   private originChannel: string;
@@ -53,7 +53,7 @@ export class OpenClawSupervisor {
     this.deps = deps;
     this.roomName = opts.roomName;
     this.originChannel = opts.originChannel;
-    this.client = new StimmSupervisorClient({
+    this.client = new NodeSupervisorClient({
       livekitUrl: opts.livekitUrl,
       token: opts.token,
     });
@@ -106,7 +106,9 @@ export class OpenClawSupervisor {
 
   private onBeforeSpeak(msg: BeforeSpeakMessage): void {
     // Could implement review/override logic here in the future.
-    this.deps.logger.debug?.(`[stimm-voice] Voice agent about to speak: "${msg.text.slice(0, 80)}..."`);
+    this.deps.logger.debug?.(
+      `[stimm-voice] Voice agent about to speak: "${msg.text.slice(0, 80)}..."`,
+    );
   }
 
   private onMetrics(msg: MetricsMessage): void {
@@ -137,7 +139,9 @@ export class OpenClawSupervisor {
     if (!text.trim()) return;
     if (this.processing) {
       // Queue or drop — for now, log and skip.
-      this.deps.logger.debug?.(`[stimm-voice] Skipping transcript (still processing previous): "${text.slice(0, 60)}"`);
+      this.deps.logger.debug?.(
+        `[stimm-voice] Skipping transcript (still processing previous): "${text.slice(0, 60)}"`,
+      );
       return;
     }
 
@@ -170,7 +174,10 @@ export class OpenClawSupervisor {
   // -- Direct commands (for tools / gateway methods) ------------------------
 
   /** Send a text instruction to the voice agent. */
-  async instruct(text: string, opts?: { speak?: boolean; priority?: "normal" | "interrupt" }): Promise<void> {
+  async instruct(
+    text: string,
+    opts?: { speak?: boolean; priority?: "normal" | "interrupt" },
+  ): Promise<void> {
     await this.client.instruct({
       text,
       speak: opts?.speak ?? true,
