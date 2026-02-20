@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// Stub child_process.spawn.
+// Stub child_process.spawn and execSync.
 const mockKill = vi.fn();
 const mockSpawn = vi.fn(() => {
   const EventEmitter = require("node:events").EventEmitter;
@@ -21,16 +21,21 @@ const mockSpawn = vi.fn(() => {
   return proc;
 });
 
+const mockExecSync = vi.fn(() => "Python 3.12.0");
+
 vi.mock("node:child_process", () => ({
   spawn: (...args: unknown[]) => (mockSpawn as Function)(...args),
+  execSync: (...args: unknown[]) => (mockExecSync as Function)(...args),
 }));
 
 const mockExistsSync = vi.fn(() => true);
+const mockReadFileSync = vi.fn(() => "stimm[deepgram,openai]>=0.1.0\n");
 vi.mock("node:fs", async (importActual) => {
   const actual = (await importActual()) as Record<string, unknown>;
   return {
     ...actual,
     existsSync: (...args: unknown[]) => (mockExistsSync as Function)(...args),
+    readFileSync: (...args: unknown[]) => (mockReadFileSync as Function)(...args),
   };
 });
 
@@ -68,6 +73,16 @@ describe("AgentProcess", () => {
     logger.warn.mockClear();
     logger.error.mockClear();
     logger.debug.mockClear();
+
+    // Reset mocks so queued mockReturnValueOnce / mockImplementationOnce
+    // values don't leak between tests, then restore default implementations.
+    mockExistsSync.mockReset();
+    mockExistsSync.mockImplementation(() => true);
+    mockExecSync.mockReset();
+    mockExecSync.mockImplementation(() => "Python 3.12.0");
+    mockReadFileSync.mockReset();
+    mockReadFileSync.mockImplementation(() => "stimm[deepgram,openai]>=0.1.0\n");
+    mockSpawn.mockClear();
   });
 
   afterEach(() => {
@@ -113,13 +128,45 @@ describe("AgentProcess", () => {
     expect(p).toBe(join("/ext/stimm-voice", "python", "agent.py"));
   });
 
-  it("errors when python path does not exist", () => {
+  it("errors when python not found and venv creation fails", () => {
+    // existsSync calls: pythonPath=false, then venvPython=false (inside ensureVenv)
     mockExistsSync.mockReturnValueOnce(false);
+    mockExistsSync.mockReturnValueOnce(false);
+    // execSync for `python3 --version` throws (no system python)
+    mockExecSync.mockImplementationOnce(() => {
+      throw new Error("not found");
+    });
+    // execSync for `python --version` also throws
+    mockExecSync.mockImplementationOnce(() => {
+      throw new Error("not found");
+    });
 
     agent = new AgentProcess(baseOpts);
     agent.start();
     expect(agent.running).toBe(false);
-    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining("Python not found"));
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining("python3 not found"));
+  });
+
+  it("auto-creates venv when python path missing", () => {
+    // First existsSync(pythonPath) = false → triggers ensureVenv
+    mockExistsSync.mockReturnValueOnce(false);
+    // ensureVenv: existsSync(venvPython) = false → needs creation
+    mockExistsSync.mockReturnValueOnce(false);
+    // After venv creation, existsSync(pythonPath) = true → proceed to spawn
+    mockExistsSync.mockReturnValueOnce(true);
+    // existsSync(agentScript) = true
+    mockExistsSync.mockReturnValueOnce(true);
+    // execSync calls: python3 --version, then venv create, then requirements check, then pip install
+    mockExecSync
+      .mockReturnValueOnce("Python 3.12.0")
+      .mockReturnValueOnce("")
+      .mockReturnValueOnce("");
+
+    agent = new AgentProcess(baseOpts);
+    agent.start();
+    expect(agent.running).toBe(true);
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining("Python venv not found"));
+    agent.stop();
   });
 
   it("passes API keys in env", () => {
