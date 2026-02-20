@@ -4,6 +4,7 @@
   "description": "OpenClaw Stimm voice plugin — dual-agent real-time voice conversations",
   "type": "module",
   "dependencies": {
+    "@livekit/rtc-node": "^0.13.24",
     "@sinclair/typebox": "0.34.48",
     "@stimm/protocol": "link:../../../stimm/packages/protocol-ts",
     "livekit-server-sdk": "^2.0.0",
