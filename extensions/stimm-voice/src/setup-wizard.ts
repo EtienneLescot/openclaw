@@ -7,8 +7,8 @@
  * Usage: `openclaw voice:setup`
  */
 
-import { execSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   STT_PROVIDERS,
@@ -21,16 +21,36 @@ import {
 } from "./config.js";
 
 // ---------------------------------------------------------------------------
-// Config writer — shells out to `openclaw config set` for safety.
+// Config writer — reads/writes ~/.openclaw/openclaw.json directly.
 // ---------------------------------------------------------------------------
 
-const CONFIG_PREFIX = "plugins.entries.stimm-voice.config";
+function deepSet(obj: Record<string, unknown>, path: string[], value: unknown): void {
+  let current: Record<string, unknown> = obj;
+  for (let i = 0; i < path.length - 1; i++) {
+    const key = path[i];
+    if (typeof current[key] !== "object" || current[key] === null) {
+      current[key] = {};
+    }
+    current = current[key] as Record<string, unknown>;
+  }
+  current[path[path.length - 1]] = value;
+}
 
-function setConfig(key: string, value: string): void {
-  const full = `${CONFIG_PREFIX}.${key}`;
-  execSync(`openclaw config set ${full} ${JSON.stringify(value)}`, {
-    stdio: "inherit",
-  });
+/**
+ * Batch-write multiple config keys into ~/.openclaw/openclaw.json.
+ * Reads once, deep-merges, writes once.
+ */
+function saveConfig(entries: Record<string, string>): void {
+  const configPath = join(homedir(), ".openclaw", "openclaw.json");
+  let config: Record<string, unknown> = {};
+  if (existsSync(configPath)) {
+    config = JSON.parse(readFileSync(configPath, "utf-8"));
+  }
+  for (const [dotKey, value] of Object.entries(entries)) {
+    const fullPath = `plugins.entries.stimm-voice.config.${dotKey}`;
+    deepSet(config, fullPath.split("."), value);
+  }
+  writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
 }
 
 // ---------------------------------------------------------------------------
@@ -400,21 +420,24 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
   s.start("Saving configuration...");
 
   try {
-    setConfig("enabled", "true");
-    setConfig("voiceAgent.stt.provider", sttProvider);
-    setConfig("voiceAgent.stt.model", String(sttModel));
-    if (sttApiKey) setConfig("voiceAgent.stt.apiKey", String(sttApiKey));
-    setConfig("voiceAgent.tts.provider", ttsProvider);
-    setConfig("voiceAgent.tts.model", String(ttsModel));
-    setConfig("voiceAgent.tts.voice", String(ttsVoice));
-    if (ttsApiKey) setConfig("voiceAgent.tts.apiKey", String(ttsApiKey));
-    setConfig("voiceAgent.llm.provider", llmProvider);
-    setConfig("voiceAgent.llm.model", String(llmModel));
-    if (llmApiKey) setConfig("voiceAgent.llm.apiKey", String(llmApiKey));
+    const entries: Record<string, string> = {
+      enabled: "true",
+      "voiceAgent.stt.provider": sttProvider,
+      "voiceAgent.stt.model": String(sttModel),
+      "voiceAgent.tts.provider": ttsProvider,
+      "voiceAgent.tts.model": String(ttsModel),
+      "voiceAgent.tts.voice": String(ttsVoice),
+      "voiceAgent.llm.provider": llmProvider,
+      "voiceAgent.llm.model": String(llmModel),
+    };
+    if (sttApiKey) entries["voiceAgent.stt.apiKey"] = String(sttApiKey);
+    if (ttsApiKey) entries["voiceAgent.tts.apiKey"] = String(ttsApiKey);
+    if (llmApiKey) entries["voiceAgent.llm.apiKey"] = String(llmApiKey);
+    if (livekitUrl) entries["livekit.url"] = livekitUrl;
+    if (livekitApiKey) entries["livekit.apiKey"] = livekitApiKey;
+    if (livekitApiSecret) entries["livekit.apiSecret"] = livekitApiSecret;
 
-    if (livekitUrl) setConfig("livekit.url", livekitUrl);
-    if (livekitApiKey) setConfig("livekit.apiKey", livekitApiKey);
-    if (livekitApiSecret) setConfig("livekit.apiSecret", livekitApiSecret);
+    saveConfig(entries);
 
     s.stop("Configuration saved.");
   } catch (err) {
