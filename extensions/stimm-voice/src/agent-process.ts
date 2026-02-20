@@ -4,10 +4,13 @@
  * Spawns `python agent.py dev` (or console mode) and monitors it.
  * Restarts on crash with exponential backoff. Reports health via
  * LiveKit room presence.
+ *
+ * On first start, auto-creates a Python venv and installs dependencies
+ * if the venv does not exist yet.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { execSync, spawn, type ChildProcess } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 export interface AgentProcessOptions {
@@ -54,13 +57,20 @@ export class AgentProcess {
     const { pythonPath, agentScript, livekitUrl, livekitApiKey, livekitApiSecret, env, logger } =
       this.options;
 
-    // Validate paths before spawning.
+    // Auto-create venv if it doesn't exist yet.
     if (!existsSync(pythonPath)) {
-      logger.error(`[stimm-voice] Python not found at: ${pythonPath}`);
-      logger.error(
-        "[stimm-voice] Run the setup script: cd extensions/stimm-voice/python && ./dev-setup.sh",
-      );
-      return;
+      const pythonDir = resolve(agentScript, "..");
+      logger.info("[stimm-voice] Python venv not found — setting up automatically...");
+      const ok = AgentProcess.ensureVenv(pythonDir, logger);
+      if (!ok) return;
+      // Verify the venv was created successfully.
+      if (!existsSync(pythonPath)) {
+        logger.error(
+          `[stimm-voice] Venv created but python not found at: ${pythonPath}\n` +
+            "Run manually: cd extensions/stimm-voice/python && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt",
+        );
+        return;
+      }
     }
     if (!existsSync(agentScript)) {
       logger.error(`[stimm-voice] agent.py not found at: ${agentScript}`);
@@ -172,5 +182,86 @@ export class AgentProcess {
   /** Resolve the default agent.py path. */
   static resolveDefaultAgentScript(extensionDir: string): string {
     return join(extensionDir, "python", "agent.py");
+  }
+
+  /**
+   * Auto-create and populate the Python venv if it doesn't exist.
+   *
+   * Steps:
+   *   1. Find `python3` on PATH.
+   *   2. Create venv at `<pythonDir>/.venv`.
+   *   3. Install requirements from `<pythonDir>/requirements.txt`.
+   *
+   * Returns `true` if the venv is ready, `false` on failure.
+   */
+  static ensureVenv(
+    pythonDir: string,
+    logger: {
+      info: (msg: string) => void;
+      warn: (msg: string) => void;
+      error: (msg: string) => void;
+    },
+  ): boolean {
+    const venvDir = join(pythonDir, ".venv");
+    const venvPython = join(venvDir, "bin", "python");
+
+    // Already exists? Quick exit.
+    if (existsSync(venvPython)) return true;
+
+    // Find a system Python 3.
+    const systemPython = AgentProcess.findSystemPython();
+    if (!systemPython) {
+      logger.error("[stimm-voice] python3 not found on PATH. Install Python 3.10+ and try again.");
+      return false;
+    }
+
+    try {
+      logger.info(`[stimm-voice] Creating venv at ${venvDir} (using ${systemPython})...`);
+      execSync(`${systemPython} -m venv ${JSON.stringify(venvDir)}`, {
+        cwd: pythonDir,
+        stdio: "pipe",
+        timeout: 60_000,
+      });
+
+      const reqFile = join(pythonDir, "requirements.txt");
+      if (existsSync(reqFile)) {
+        const pip = join(venvDir, "bin", "pip");
+        logger.info("[stimm-voice] Installing Python dependencies (this may take a minute)...");
+        const reqs = readFileSync(reqFile, "utf-8").trim();
+        logger.info(`[stimm-voice] requirements: ${reqs.split("\n").join(", ")}`);
+        execSync(`${JSON.stringify(pip)} install -r ${JSON.stringify(reqFile)}`, {
+          cwd: pythonDir,
+          stdio: "pipe",
+          timeout: 300_000, // 5 min for large installs
+        });
+        logger.info("[stimm-voice] Python dependencies installed.");
+      }
+
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[stimm-voice] Failed to create Python venv: ${msg}`);
+      logger.error(
+        "Try manually: cd extensions/stimm-voice/python && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt",
+      );
+      return false;
+    }
+  }
+
+  /** Find a usable system Python 3 (python3, python). */
+  static findSystemPython(): string | null {
+    for (const cmd of ["python3", "python"]) {
+      try {
+        const version = execSync(`${cmd} --version 2>&1`, { encoding: "utf-8" }).trim();
+        // Ensure it's Python 3.10+.
+        const match = version.match(/Python\s+(\d+)\.(\d+)/);
+        if (match && Number(match[1]) >= 3 && Number(match[2]) >= 10) {
+          return cmd;
+        }
+      } catch {
+        // Not found, try next.
+      }
+    }
+    return null;
   }
 }

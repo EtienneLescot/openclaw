@@ -1,11 +1,11 @@
 /**
  * CLI subcommand registration for the stimm-voice plugin.
  *
- * Exposes `openclaw voice [start|stop|status|join]` commands.
+ * Exposes `openclaw voice [start|stop|status|setup]` commands.
  */
 
-import type { RoomManager } from "./room-manager.js";
 import type { StimmVoiceConfig } from "./config.js";
+import type { RoomManager } from "./room-manager.js";
 
 interface VoiceCliDeps {
   program: {
@@ -18,6 +18,8 @@ interface VoiceCliDeps {
   config: StimmVoiceConfig;
   ensureRuntime: () => Promise<{ roomManager: RoomManager }>;
   logger: { info: (message: string) => void; error: (message: string) => void };
+  /** Extension root directory (for venv detection in setup). */
+  extensionDir?: string;
 }
 
 export function registerStimmVoiceCli(deps: VoiceCliDeps): void {
@@ -69,18 +71,29 @@ export function registerStimmVoiceCli(deps: VoiceCliDeps): void {
     });
 
   const status = program.command("voice:status");
-  status
-    .description("List active voice sessions")
+  status.description("List active voice sessions").action(async () => {
+    const rt = await ensureRuntime();
+    const sessions = rt.roomManager.listSessions();
+    if (sessions.length === 0) {
+      logger.info("No active voice sessions.");
+      return;
+    }
+    for (const s of sessions) {
+      const age = Math.round((Date.now() - s.createdAt) / 1000);
+      logger.info(
+        `  ${s.roomName}  channel=${s.originChannel}  age=${age}s  supervisor=${s.supervisor.connected ? "connected" : "disconnected"}`,
+      );
+    }
+  });
+
+  const setup = program.command("voice:setup");
+  setup
+    .description("Interactive setup wizard — choose providers, models, and API keys")
     .action(async () => {
-      const rt = await ensureRuntime();
-      const sessions = rt.roomManager.listSessions();
-      if (sessions.length === 0) {
-        logger.info("No active voice sessions.");
-        return;
-      }
-      for (const s of sessions) {
-        const age = Math.round((Date.now() - s.createdAt) / 1000);
-        logger.info(`  ${s.roomName}  channel=${s.originChannel}  age=${age}s  supervisor=${s.supervisor.connected ? "connected" : "disconnected"}`);
-      }
+      const { runSetupWizard } = await import("./setup-wizard.js");
+      await runSetupWizard({
+        logger,
+        extensionDir: deps.extensionDir ?? "",
+      });
     });
 }
