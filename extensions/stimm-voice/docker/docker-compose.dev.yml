@@ -1,0 +1,17 @@
+# Stimm Voice — Development Docker Compose
+# Just LiveKit server. Run the Python agent natively for fast iteration.
+#
+# Usage:
+#   docker compose -f docker/docker-compose.dev.yml up -d
+#   # Then run the agent: cd $STIMM_REPO && python -m stimm.examples.basic
+
+services:
+  livekit:
+    image: livekit/livekit-server:latest
+    command: --dev --bind 0.0.0.0
+    ports:
+      - "7880:7880"   # WebSocket + HTTP
+      - "7881:7881"   # RTC (WebRTC)
+      - "7882:7882"   # TURN/TLS
+    environment:
+      LIVEKIT_KEYS: "devkey: secret"
