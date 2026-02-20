@@ -1,0 +1,402 @@
+/**
+ * Stimm Voice — OpenClaw plugin entry point.
+ *
+ * Dual-agent voice sessions: a fast VoiceAgent (Python/LiveKit) handles
+ * real-time audio while an OpenClaw Supervisor (TypeScript) provides
+ * reasoning, tools, and context via the Stimm data-channel protocol.
+ */
+
+import { Type } from "@sinclair/typebox";
+import type { GatewayRequestHandlerOptions, OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { resolveStimmVoiceConfig, type StimmVoiceConfig } from "./src/config.js";
+import { RoomManager, type VoiceSession } from "./src/room-manager.js";
+import type { SupervisorDeps } from "./src/supervisor.js";
+import { registerStimmVoiceCli } from "./src/cli.js";
+
+// ---------------------------------------------------------------------------
+// Tool schema — flat object, no Type.Union (per repo guardrails).
+// ---------------------------------------------------------------------------
+
+const ACTIONS = ["start_session", "end_session", "instruct", "add_context", "set_mode", "status"] as const;
+
+function stringEnum<T extends readonly string[]>(
+  values: T,
+  opts: { description?: string } = {},
+) {
+  return Type.Unsafe<T[number]>({
+    type: "string",
+    enum: [...values],
+    ...opts,
+  });
+}
+
+const StimmVoiceToolSchema = Type.Object({
+  action: stringEnum(ACTIONS, {
+    description: `Action: ${ACTIONS.join(", ")}`,
+  }),
+  room: Type.Optional(Type.String({ description: "Room name (for end_session, instruct, add_context, set_mode, status)" })),
+  channel: Type.Optional(Type.String({ description: "Origin channel for routing (default: web)" })),
+  text: Type.Optional(Type.String({ description: "Text to instruct the voice agent, or context to add" })),
+  mode: Type.Optional(stringEnum(["autonomous", "relay", "hybrid"] as const, { description: "Voice agent mode" })),
+  speak: Type.Optional(Type.Boolean({ description: "Whether the voice agent should speak the instruction aloud" })),
+});
+
+// ---------------------------------------------------------------------------
+// Plugin definition
+// ---------------------------------------------------------------------------
+
+const stimmVoicePlugin = {
+  id: "stimm-voice",
+  name: "Stimm Voice",
+  description: "Real-time voice conversations powered by Stimm dual-agent architecture",
+
+  register(api: OpenClawPluginApi) {
+    const config = resolveStimmVoiceConfig(api.pluginConfig);
+
+    // -- Lazy runtime -------------------------------------------------------
+
+    let roomManager: RoomManager | null = null;
+    let roomManagerPromise: Promise<RoomManager> | null = null;
+
+    const ensureRuntime = async (): Promise<{ roomManager: RoomManager }> => {
+      if (!config.enabled) {
+        throw new Error("[stimm-voice] Plugin is disabled. Set stimm-voice.enabled=true.");
+      }
+      if (roomManager) return { roomManager };
+      if (!roomManagerPromise) {
+        roomManagerPromise = initRoomManager(config, api);
+      }
+      roomManager = await roomManagerPromise;
+      return { roomManager };
+    };
+
+    // -- Gateway methods ----------------------------------------------------
+
+    const sendError = (respond: (ok: boolean, payload?: unknown) => void, err: unknown) => {
+      respond(false, { error: err instanceof Error ? err.message : String(err) });
+    };
+
+    api.registerGatewayMethod(
+      "stimm.start",
+      async ({ params, respond }: GatewayRequestHandlerOptions) => {
+        try {
+          const rt = await ensureRuntime();
+          const session = await rt.roomManager.createSession({
+            roomName: typeof params?.room === "string" ? params.room : undefined,
+            originChannel: typeof params?.channel === "string" ? params.channel : "web",
+          });
+          respond(true, sessionPayload(session));
+        } catch (err) {
+          sendError(respond, err);
+        }
+      },
+    );
+
+    api.registerGatewayMethod(
+      "stimm.end",
+      async ({ params, respond }: GatewayRequestHandlerOptions) => {
+        try {
+          const room = typeof params?.room === "string" ? params.room.trim() : "";
+          if (!room) {
+            respond(false, { error: "room required" });
+            return;
+          }
+          const rt = await ensureRuntime();
+          const ok = await rt.roomManager.endSession(room);
+          respond(ok, ok ? { ended: true } : { error: "session not found" });
+        } catch (err) {
+          sendError(respond, err);
+        }
+      },
+    );
+
+    api.registerGatewayMethod(
+      "stimm.instruct",
+      async ({ params, respond }: GatewayRequestHandlerOptions) => {
+        try {
+          const room = typeof params?.room === "string" ? params.room.trim() : "";
+          const text = typeof params?.text === "string" ? params.text.trim() : "";
+          if (!room || !text) {
+            respond(false, { error: "room and text required" });
+            return;
+          }
+          const rt = await ensureRuntime();
+          const session = rt.roomManager.getSession(room);
+          if (!session) {
+            respond(false, { error: "session not found" });
+            return;
+          }
+          const speak = typeof params?.speak === "boolean" ? params.speak : true;
+          await session.supervisor.instruct(text, { speak });
+          respond(true, { instructed: true });
+        } catch (err) {
+          sendError(respond, err);
+        }
+      },
+    );
+
+    api.registerGatewayMethod(
+      "stimm.status",
+      async ({ params, respond }: GatewayRequestHandlerOptions) => {
+        try {
+          const rt = await ensureRuntime();
+          const room = typeof params?.room === "string" ? params.room.trim() : "";
+          if (room) {
+            const session = rt.roomManager.getSession(room);
+            respond(true, session ? sessionPayload(session) : { found: false });
+          } else {
+            const sessions = rt.roomManager.listSessions().map(sessionPayload);
+            respond(true, { sessions });
+          }
+        } catch (err) {
+          sendError(respond, err);
+        }
+      },
+    );
+
+    api.registerGatewayMethod(
+      "stimm.mode",
+      async ({ params, respond }: GatewayRequestHandlerOptions) => {
+        try {
+          const room = typeof params?.room === "string" ? params.room.trim() : "";
+          const mode = typeof params?.mode === "string" ? params.mode.trim() : "";
+          if (!room || !mode) {
+            respond(false, { error: "room and mode required" });
+            return;
+          }
+          if (!["autonomous", "relay", "hybrid"].includes(mode)) {
+            respond(false, { error: `Invalid mode: ${mode}` });
+            return;
+          }
+          const rt = await ensureRuntime();
+          const session = rt.roomManager.getSession(room);
+          if (!session) {
+            respond(false, { error: "session not found" });
+            return;
+          }
+          await session.supervisor.setMode(mode as "autonomous" | "relay" | "hybrid");
+          respond(true, { mode });
+        } catch (err) {
+          sendError(respond, err);
+        }
+      },
+    );
+
+    // -- Tool ---------------------------------------------------------------
+
+    api.registerTool({
+      name: "stimm_voice",
+      label: "Stimm Voice",
+      description:
+        "Start, control, and end real-time voice sessions. " +
+        "Uses Stimm dual-agent architecture: a fast VoiceAgent handles audio " +
+        "while OpenClaw provides reasoning and tools.",
+      parameters: StimmVoiceToolSchema,
+      async execute(_toolCallId: string, params: Record<string, unknown>) {
+        const json = (payload: unknown) => ({
+          content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
+          details: payload,
+        });
+
+        try {
+          const rt = await ensureRuntime();
+          const action = typeof params?.action === "string" ? params.action : "";
+
+          switch (action) {
+            case "start_session": {
+              const session = await rt.roomManager.createSession({
+                roomName: typeof params.room === "string" ? params.room : undefined,
+                originChannel: typeof params.channel === "string" ? params.channel : "web",
+              });
+              return json(sessionPayload(session));
+            }
+
+            case "end_session": {
+              const room = String(params.room || "").trim();
+              if (!room) throw new Error("room required");
+              const ok = await rt.roomManager.endSession(room);
+              if (!ok) throw new Error("session not found");
+              return json({ ended: true, room });
+            }
+
+            case "instruct": {
+              const room = String(params.room || "").trim();
+              const text = String(params.text || "").trim();
+              if (!room || !text) throw new Error("room and text required");
+              const session = rt.roomManager.getSession(room);
+              if (!session) throw new Error("session not found");
+              const speak = typeof params.speak === "boolean" ? params.speak : true;
+              await session.supervisor.instruct(text, { speak });
+              return json({ instructed: true, room });
+            }
+
+            case "add_context": {
+              const room = String(params.room || "").trim();
+              const text = String(params.text || "").trim();
+              if (!room || !text) throw new Error("room and text required");
+              const session = rt.roomManager.getSession(room);
+              if (!session) throw new Error("session not found");
+              await session.supervisor.addContext(text);
+              return json({ context_added: true, room });
+            }
+
+            case "set_mode": {
+              const room = String(params.room || "").trim();
+              const mode = String(params.mode || "").trim();
+              if (!room || !mode) throw new Error("room and mode required");
+              if (!["autonomous", "relay", "hybrid"].includes(mode)) {
+                throw new Error(`Invalid mode: ${mode}`);
+              }
+              const session = rt.roomManager.getSession(room);
+              if (!session) throw new Error("session not found");
+              await session.supervisor.setMode(mode as "autonomous" | "relay" | "hybrid");
+              return json({ mode, room });
+            }
+
+            case "status": {
+              const room = typeof params.room === "string" ? params.room.trim() : "";
+              if (room) {
+                const session = rt.roomManager.getSession(room);
+                return json(session ? sessionPayload(session) : { found: false });
+              }
+              return json({
+                sessions: rt.roomManager.listSessions().map(sessionPayload),
+              });
+            }
+
+            default:
+              throw new Error(`Unknown action: ${action}`);
+          }
+        } catch (err) {
+          return json({
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+    });
+
+    // -- CLI ----------------------------------------------------------------
+
+    api.registerCli(
+      ({ program }) =>
+        registerStimmVoiceCli({
+          program,
+          config,
+          ensureRuntime,
+          logger: api.logger,
+        }),
+      { commands: ["voice"] },
+    );
+
+    // -- Service lifecycle --------------------------------------------------
+
+    api.registerService({
+      id: "stimm-voice",
+      start: async () => {
+        if (!config.enabled) return;
+        try {
+          await ensureRuntime();
+          api.logger.info("[stimm-voice] Service started.");
+        } catch (err) {
+          api.logger.error(
+            `[stimm-voice] Failed to start: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      },
+      stop: async () => {
+        if (!roomManagerPromise) return;
+        try {
+          const rm = await roomManagerPromise;
+          await rm.stopAll();
+          api.logger.info("[stimm-voice] Service stopped — all sessions ended.");
+        } finally {
+          roomManagerPromise = null;
+          roomManager = null;
+        }
+      },
+    });
+
+    // -- HTTP route (web voice endpoint) ------------------------------------
+
+    if (config.web.enabled) {
+      api.registerHttpRoute({
+        path: config.web.path,
+        handler: async (req, res) => {
+          if (req.method === "POST") {
+            // Start a new session and return client token for the browser SDK.
+            try {
+              const rt = await ensureRuntime();
+              const session = await rt.roomManager.createSession({
+                originChannel: "web",
+              });
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(sessionPayload(session)));
+            } catch (err) {
+              res.writeHead(500, { "Content-Type": "application/json" });
+              res.end(
+                JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
+              );
+            }
+          } else {
+            // GET — return a minimal info page.
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                plugin: "stimm-voice",
+                status: config.enabled ? "enabled" : "disabled",
+                hint: "POST to this endpoint to start a web voice session.",
+              }),
+            );
+          }
+        },
+      });
+    }
+  },
+};
+
+export default stimmVoicePlugin;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+async function initRoomManager(config: StimmVoiceConfig, api: OpenClawPluginApi): Promise<RoomManager> {
+  const supervisorDeps: SupervisorDeps = {
+    processMessage: async (text, opts) => {
+      // Route through the OpenClaw agent pipeline via dispatchReplyFromConfig.
+      //
+      // TODO: Wire up to dispatchReplyFromConfig once the full inbound-context
+      // builder is available in the plugin runtime. For now, the supervisor
+      // relays transcripts as gateway chat.send via a loopback RPC call,
+      // or returns a placeholder so the voice agent stays in autonomous mode.
+      //
+      // Future wire-up path:
+      //   api.runtime.channel.reply.dispatchReplyFromConfig({ ctx, cfg, dispatcher })
+      //
+      // This requires building a synthetic MsgContext for the voice session,
+      // which will be implemented once the dual-agent loop is proven end-to-end.
+      api.logger.debug?.(
+        `[stimm-voice] Transcript from ${opts.roomName} (${opts.channel}): "${text}"`,
+      );
+      return "";
+    },
+    logger: api.logger,
+  };
+
+  return new RoomManager({
+    livekit: config.livekit,
+    voiceAgent: config.voiceAgent,
+    supervisorDeps,
+  });
+}
+
+/** Serialize a VoiceSession for gateway/tool responses (omit internals). */
+function sessionPayload(session: VoiceSession) {
+  return {
+    room: session.roomName,
+    clientToken: session.clientToken,
+    channel: session.originChannel,
+    createdAt: session.createdAt,
+    supervisorConnected: session.supervisor.connected,
+  };
+}

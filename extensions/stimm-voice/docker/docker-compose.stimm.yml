@@ -1,0 +1,35 @@
+# Stimm Voice — Docker Compose
+#
+# Runs LiveKit server + Stimm voice agent for local development.
+#
+# Usage:
+#   docker compose -f extensions/stimm-voice/docker/docker-compose.stimm.yml up
+#
+# The LiveKit dashboard is available at http://localhost:7880
+# API key: devkey / API secret: secret
+
+services:
+  livekit:
+    image: livekit/livekit-server:latest
+    command: --dev --bind 0.0.0.0
+    ports:
+      - "7880:7880"   # WebSocket + HTTP API
+      - "7881:7881"   # RTC (WebRTC)
+    environment:
+      LIVEKIT_KEYS: "devkey: secret"
+    restart: unless-stopped
+
+  stimm-voice-agent:
+    build:
+      context: ../python
+      dockerfile: Dockerfile
+    depends_on:
+      - livekit
+    environment:
+      LIVEKIT_URL: ws://livekit:7880
+      LIVEKIT_API_KEY: devkey
+      LIVEKIT_API_SECRET: secret
+      # Provider API keys — pass from host environment
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    restart: unless-stopped

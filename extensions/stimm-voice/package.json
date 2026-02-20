@@ -1,0 +1,20 @@
+{
+  "name": "@openclaw/stimm-voice",
+  "version": "2026.2.20",
+  "description": "OpenClaw Stimm voice plugin — dual-agent real-time voice conversations",
+  "type": "module",
+  "dependencies": {
+    "@sinclair/typebox": "0.34.48",
+    "@stimm/protocol": "^0.1.0",
+    "livekit-server-sdk": "^2.0.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
