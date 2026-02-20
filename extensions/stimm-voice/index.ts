@@ -8,21 +8,27 @@
 
 import { Type } from "@sinclair/typebox";
 import type { GatewayRequestHandlerOptions, OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { registerStimmVoiceCli } from "./src/cli.js";
 import { resolveStimmVoiceConfig, type StimmVoiceConfig } from "./src/config.js";
+import type { CoreConfig } from "./src/core-bridge.js";
+import { generateStimmResponse } from "./src/response-generator.js";
 import { RoomManager, type VoiceSession } from "./src/room-manager.js";
 import type { SupervisorDeps } from "./src/supervisor.js";
-import { registerStimmVoiceCli } from "./src/cli.js";
 
 // ---------------------------------------------------------------------------
 // Tool schema — flat object, no Type.Union (per repo guardrails).
 // ---------------------------------------------------------------------------
 
-const ACTIONS = ["start_session", "end_session", "instruct", "add_context", "set_mode", "status"] as const;
+const ACTIONS = [
+  "start_session",
+  "end_session",
+  "instruct",
+  "add_context",
+  "set_mode",
+  "status",
+] as const;
 
-function stringEnum<T extends readonly string[]>(
-  values: T,
-  opts: { description?: string } = {},
-) {
+function stringEnum<T extends readonly string[]>(values: T, opts: { description?: string } = {}) {
   return Type.Unsafe<T[number]>({
     type: "string",
     enum: [...values],
@@ -34,11 +40,21 @@ const StimmVoiceToolSchema = Type.Object({
   action: stringEnum(ACTIONS, {
     description: `Action: ${ACTIONS.join(", ")}`,
   }),
-  room: Type.Optional(Type.String({ description: "Room name (for end_session, instruct, add_context, set_mode, status)" })),
+  room: Type.Optional(
+    Type.String({
+      description: "Room name (for end_session, instruct, add_context, set_mode, status)",
+    }),
+  ),
   channel: Type.Optional(Type.String({ description: "Origin channel for routing (default: web)" })),
-  text: Type.Optional(Type.String({ description: "Text to instruct the voice agent, or context to add" })),
-  mode: Type.Optional(stringEnum(["autonomous", "relay", "hybrid"] as const, { description: "Voice agent mode" })),
-  speak: Type.Optional(Type.Boolean({ description: "Whether the voice agent should speak the instruction aloud" })),
+  text: Type.Optional(
+    Type.String({ description: "Text to instruct the voice agent, or context to add" }),
+  ),
+  mode: Type.Optional(
+    stringEnum(["autonomous", "relay", "hybrid"] as const, { description: "Voice agent mode" }),
+  ),
+  speak: Type.Optional(
+    Type.Boolean({ description: "Whether the voice agent should speak the instruction aloud" }),
+  ),
 });
 
 // ---------------------------------------------------------------------------
@@ -333,9 +349,7 @@ const stimmVoicePlugin = {
               res.end(JSON.stringify(sessionPayload(session)));
             } catch (err) {
               res.writeHead(500, { "Content-Type": "application/json" });
-              res.end(
-                JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
-              );
+              res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
             }
           } else {
             // GET — return a minimal info page.
@@ -360,25 +374,32 @@ export default stimmVoicePlugin;
 // Helpers
 // ---------------------------------------------------------------------------
 
-async function initRoomManager(config: StimmVoiceConfig, api: OpenClawPluginApi): Promise<RoomManager> {
+async function initRoomManager(
+  config: StimmVoiceConfig,
+  api: OpenClawPluginApi,
+): Promise<RoomManager> {
+  const coreConfig = api.config as CoreConfig;
+
   const supervisorDeps: SupervisorDeps = {
     processMessage: async (text, opts) => {
-      // Route through the OpenClaw agent pipeline via dispatchReplyFromConfig.
-      //
-      // TODO: Wire up to dispatchReplyFromConfig once the full inbound-context
-      // builder is available in the plugin runtime. For now, the supervisor
-      // relays transcripts as gateway chat.send via a loopback RPC call,
-      // or returns a placeholder so the voice agent stays in autonomous mode.
-      //
-      // Future wire-up path:
-      //   api.runtime.channel.reply.dispatchReplyFromConfig({ ctx, cfg, dispatcher })
-      //
-      // This requires building a synthetic MsgContext for the voice session,
-      // which will be implemented once the dual-agent loop is proven end-to-end.
-      api.logger.debug?.(
-        `[stimm-voice] Transcript from ${opts.roomName} (${opts.channel}): "${text}"`,
+      // Route transcript through the embedded Pi agent (same infra as voice-call).
+      // Maintains a per-room session with full tool access and conversation history.
+      api.logger.info(
+        `[stimm-voice] Processing transcript from ${opts.roomName} (${opts.channel}): "${text.slice(0, 80)}"`,
       );
-      return "";
+
+      const result = await generateStimmResponse({
+        coreConfig,
+        roomName: opts.roomName,
+        channel: opts.channel,
+        text,
+      });
+
+      if (result.error) {
+        api.logger.error(`[stimm-voice] Agent error: ${result.error}`);
+      }
+
+      return result.text ?? "";
     },
     logger: api.logger,
   };
