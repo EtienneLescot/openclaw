@@ -8,6 +8,7 @@ bun.lock
 bun.lockb
 coverage
 __pycache__/
+.venv/
 *.pyc
 .tsbuildinfo
 .pnpm-store
