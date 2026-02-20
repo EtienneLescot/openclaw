@@ -34,9 +34,7 @@ export class RoomManager {
     this.livekit = opts.livekit;
     this.supervisorDeps = opts.supervisorDeps;
     this.logger = opts.supervisorDeps.logger;
-    const httpUrl = opts.livekit.url
-      .replace("ws://", "http://")
-      .replace("wss://", "https://");
+    const httpUrl = opts.livekit.url.replace("ws://", "http://").replace("wss://", "https://");
     this.roomService = new RoomServiceClient(httpUrl, opts.livekit.apiKey, opts.livekit.apiSecret);
   }
 
@@ -53,7 +51,7 @@ export class RoomManager {
     this.logger.info(`[stimm-voice] Created LiveKit room: ${roomName}`);
 
     // Generate supervisor token (data-only, no audio).
-    const supervisorToken = this.generateToken({
+    const supervisorToken = await this.generateToken({
       identity: "stimm-supervisor",
       roomName,
       canPublish: false,
@@ -72,7 +70,7 @@ export class RoomManager {
     await supervisor.connect();
 
     // Generate client token (audio + data).
-    const clientToken = this.generateToken({
+    const clientToken = await this.generateToken({
       identity: opts.userIdentity ?? "user",
       roomName,
       canPublish: true,
@@ -89,7 +87,9 @@ export class RoomManager {
     };
 
     this.sessions.set(roomName, session);
-    this.logger.info(`[stimm-voice] Voice session started: ${roomName} (origin: ${opts.originChannel})`);
+    this.logger.info(
+      `[stimm-voice] Voice session started: ${roomName} (origin: ${opts.originChannel})`,
+    );
     return session;
   }
 
@@ -133,14 +133,14 @@ export class RoomManager {
 
   // -- Token generation -----------------------------------------------------
 
-  private generateToken(opts: {
+  private async generateToken(opts: {
     identity: string;
     roomName: string;
     canPublish?: boolean;
     canSubscribe?: boolean;
     canPublishData?: boolean;
     ttlSeconds?: number;
-  }): string {
+  }): Promise<string> {
     const token = new AccessToken(this.livekit.apiKey, this.livekit.apiSecret, {
       identity: opts.identity,
       ttl: opts.ttlSeconds ?? 3600,
@@ -155,7 +155,7 @@ export class RoomManager {
     };
     token.addGrant(grant);
 
-    return token.toJwt();
+    return await token.toJwt();
   }
 }
 

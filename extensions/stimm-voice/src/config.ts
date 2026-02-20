@@ -29,9 +29,9 @@ export const LlmConfigSchema = z.object({
 export const VoiceAgentConfigSchema = z.object({
   docker: z.boolean().default(true),
   image: z.string().default("ghcr.io/stimm-ai/stimm-agent:latest"),
-  stt: SttConfigSchema.default({}),
-  tts: TtsConfigSchema.default({}),
-  llm: LlmConfigSchema.default({}),
+  stt: SttConfigSchema.default(() => SttConfigSchema.parse({})),
+  tts: TtsConfigSchema.default(() => TtsConfigSchema.parse({})),
+  llm: LlmConfigSchema.default(() => LlmConfigSchema.parse({})),
   bufferingLevel: z.enum(["NONE", "LOW", "MEDIUM", "HIGH"]).default("MEDIUM"),
   mode: z.enum(["autonomous", "relay", "hybrid"]).default("hybrid"),
 });
@@ -43,9 +43,9 @@ export const WebConfigSchema = z.object({
 
 export const StimmVoiceConfigSchema = z.object({
   enabled: z.boolean().default(false),
-  livekit: LiveKitConfigSchema.default({}),
-  voiceAgent: VoiceAgentConfigSchema.default({}),
-  web: WebConfigSchema.default({}),
+  livekit: LiveKitConfigSchema.default(() => LiveKitConfigSchema.parse({})),
+  voiceAgent: VoiceAgentConfigSchema.default(() => VoiceAgentConfigSchema.parse({})),
+  web: WebConfigSchema.default(() => WebConfigSchema.parse({})),
 });
 
 export type StimmVoiceConfig = z.infer<typeof StimmVoiceConfigSchema>;
@@ -57,8 +57,6 @@ export type VoiceAgentConfig = z.infer<typeof VoiceAgentConfigSchema>;
  */
 export function resolveStimmVoiceConfig(raw: unknown): StimmVoiceConfig {
   const value =
-    raw && typeof raw === "object" && !Array.isArray(raw)
-      ? (raw as Record<string, unknown>)
-      : {};
+    raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
   return StimmVoiceConfigSchema.parse(value);
 }
