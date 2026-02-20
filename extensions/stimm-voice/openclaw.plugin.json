@@ -48,48 +48,104 @@
           "stt": {
             "type": "object",
             "additionalProperties": false,
+            "description": "Speech-to-Text pipeline configuration.",
             "properties": {
               "provider": {
                 "type": "string",
-                "enum": ["deepgram", "google", "openai"],
-                "default": "deepgram"
+                "enum": [
+                  "deepgram",
+                  "openai",
+                  "google",
+                  "azure",
+                  "assemblyai",
+                  "aws",
+                  "speechmatics",
+                  "clova",
+                  "fal"
+                ],
+                "default": "deepgram",
+                "description": "livekit-plugins-* STT provider"
               },
               "model": {
                 "type": "string",
-                "default": "nova-2"
+                "default": "nova-3",
+                "description": "Model name for the STT provider (e.g. nova-3, gpt-4o-mini-transcribe)"
+              },
+              "apiKey": {
+                "type": "string",
+                "description": "API key for the STT provider. Falls back to STIMM_STT_API_KEY env, then to the provider-specific env var (e.g. DEEPGRAM_API_KEY)."
+              },
+              "language": {
+                "type": "string",
+                "description": "Language code (e.g. en, en-US). Provider-dependent."
               }
             }
           },
           "tts": {
             "type": "object",
             "additionalProperties": false,
+            "description": "Text-to-Speech pipeline configuration.",
             "properties": {
               "provider": {
                 "type": "string",
-                "enum": ["openai", "elevenlabs", "cartesia", "google"],
-                "default": "openai"
+                "enum": [
+                  "openai",
+                  "elevenlabs",
+                  "cartesia",
+                  "google",
+                  "azure",
+                  "aws",
+                  "playai",
+                  "rime"
+                ],
+                "default": "openai",
+                "description": "livekit-plugins-* TTS provider"
               },
               "model": {
                 "type": "string",
-                "default": "tts-1"
+                "default": "gpt-4o-mini-tts",
+                "description": "Model name for the TTS provider (e.g. gpt-4o-mini-tts, eleven_turbo_v2_5, sonic-2)"
               },
               "voice": {
                 "type": "string",
-                "default": "alloy"
+                "default": "ash",
+                "description": "Voice name or ID (e.g. ash, rachel). Provider-dependent."
+              },
+              "apiKey": {
+                "type": "string",
+                "description": "API key for the TTS provider. Falls back to STIMM_TTS_API_KEY env, then to the provider-specific env var (e.g. OPENAI_API_KEY)."
               }
             }
           },
           "llm": {
             "type": "object",
             "additionalProperties": false,
+            "description": "Fast LLM provider for the voice agent.",
             "properties": {
               "provider": {
                 "type": "string",
-                "default": "openai"
+                "enum": [
+                  "openai",
+                  "anthropic",
+                  "google",
+                  "groq",
+                  "azure",
+                  "cerebras",
+                  "fireworks",
+                  "together",
+                  "sambanova"
+                ],
+                "default": "openai",
+                "description": "livekit-plugins-* LLM provider"
               },
               "model": {
                 "type": "string",
-                "default": "gpt-4o-mini"
+                "default": "gpt-4o-mini",
+                "description": "Model name for the LLM provider (e.g. gpt-4o-mini, claude-sonnet-4-20250514, gemini-2.0-flash)"
+              },
+              "apiKey": {
+                "type": "string",
+                "description": "API key for the LLM provider. Falls back to STIMM_LLM_API_KEY env, then to the provider-specific env var (e.g. OPENAI_API_KEY)."
               }
             }
           },
@@ -102,6 +158,31 @@
             "type": "string",
             "enum": ["autonomous", "relay", "hybrid"],
             "default": "hybrid"
+          },
+          "spawn": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Auto-spawn configuration for the Python voice agent process.",
+            "properties": {
+              "autoSpawn": {
+                "type": "boolean",
+                "default": true,
+                "description": "Automatically start the Python voice agent when the gateway starts"
+              },
+              "pythonPath": {
+                "type": "string",
+                "description": "Path to the Python executable (defaults to extension venv)"
+              },
+              "agentScript": {
+                "type": "string",
+                "description": "Path to agent.py (defaults to extension python/agent.py)"
+              },
+              "maxRestarts": {
+                "type": "number",
+                "default": 5,
+                "description": "Max automatic restarts before giving up"
+              }
+            }
           }
         }
       },
@@ -137,6 +218,54 @@
       "label": "LiveKit API Secret",
       "sensitive": true
     },
+    "voiceAgent.stt.provider": {
+      "label": "STT Provider",
+      "help": "Speech-to-Text provider: deepgram, openai, google, azure, assemblyai, aws, speechmatics, clova, fal"
+    },
+    "voiceAgent.stt.model": {
+      "label": "STT Model",
+      "help": "Model name for your STT provider (e.g. nova-3, gpt-4o-mini-transcribe)"
+    },
+    "voiceAgent.stt.apiKey": {
+      "label": "STT API Key",
+      "sensitive": true,
+      "help": "API key for the STT provider. Falls back to STIMM_STT_API_KEY → provider env var."
+    },
+    "voiceAgent.stt.language": {
+      "label": "STT Language",
+      "advanced": true,
+      "help": "Language code (e.g. en, en-US)"
+    },
+    "voiceAgent.tts.provider": {
+      "label": "TTS Provider",
+      "help": "Text-to-Speech provider: openai, elevenlabs, cartesia, google, azure, aws, playai, rime"
+    },
+    "voiceAgent.tts.model": {
+      "label": "TTS Model",
+      "help": "Model name (e.g. gpt-4o-mini-tts, eleven_turbo_v2_5, sonic-2)"
+    },
+    "voiceAgent.tts.voice": {
+      "label": "TTS Voice",
+      "help": "Voice name or ID (e.g. ash, rachel, alloy)"
+    },
+    "voiceAgent.tts.apiKey": {
+      "label": "TTS API Key",
+      "sensitive": true,
+      "help": "API key for the TTS provider. Falls back to STIMM_TTS_API_KEY → provider env var."
+    },
+    "voiceAgent.llm.provider": {
+      "label": "LLM Provider",
+      "help": "Fast LLM provider: openai, anthropic, google, groq, azure, cerebras, fireworks, together, sambanova"
+    },
+    "voiceAgent.llm.model": {
+      "label": "LLM Model",
+      "help": "Model name (e.g. gpt-4o-mini, claude-sonnet-4-20250514, gemini-2.0-flash)"
+    },
+    "voiceAgent.llm.apiKey": {
+      "label": "LLM API Key",
+      "sensitive": true,
+      "help": "API key for the LLM provider. Falls back to STIMM_LLM_API_KEY → provider env var."
+    },
     "voiceAgent.docker": {
       "label": "Run in Docker",
       "help": "Run the Python voice agent in a Docker container"
@@ -145,19 +274,6 @@
       "label": "Voice Agent Docker Image",
       "advanced": true
     },
-    "voiceAgent.stt.provider": {
-      "label": "STT Provider"
-    },
-    "voiceAgent.tts.provider": {
-      "label": "TTS Provider"
-    },
-    "voiceAgent.tts.voice": {
-      "label": "TTS Voice"
-    },
-    "voiceAgent.llm.model": {
-      "label": "Fast LLM Model",
-      "help": "Small fast model for the voice agent (e.g. gpt-4o-mini)"
-    },
     "voiceAgent.bufferingLevel": {
       "label": "Buffering Level",
       "advanced": true
@@ -165,6 +281,19 @@
     "voiceAgent.mode": {
       "label": "Voice Agent Mode",
       "help": "autonomous: voice agent self-directs; relay: speaks supervisor text; hybrid: blends both"
+    },
+    "voiceAgent.spawn.autoSpawn": {
+      "label": "Auto-Start Agent",
+      "help": "Automatically start the Python voice agent when the gateway starts"
+    },
+    "voiceAgent.spawn.pythonPath": {
+      "label": "Python Path",
+      "advanced": true,
+      "help": "Path to the Python executable. Leave empty to use the extension's venv."
+    },
+    "voiceAgent.spawn.maxRestarts": {
+      "label": "Max Restarts",
+      "advanced": true
     },
     "web.enabled": {
       "label": "Enable Web Voice"
