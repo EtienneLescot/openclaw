@@ -6,8 +6,10 @@
  * reasoning, tools, and context via the Stimm data-channel protocol.
  */
 
+import { dirname, resolve } from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { GatewayRequestHandlerOptions, OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { AgentProcess } from "./src/agent-process.js";
 import { registerStimmVoiceCli } from "./src/cli.js";
 import { resolveStimmVoiceConfig, type StimmVoiceConfig } from "./src/config.js";
 import type { CoreConfig } from "./src/core-bridge.js";
@@ -73,6 +75,7 @@ const stimmVoicePlugin = {
 
     let roomManager: RoomManager | null = null;
     let roomManagerPromise: Promise<RoomManager> | null = null;
+    let agentProcess: AgentProcess | null = null;
 
     const ensureRuntime = async (): Promise<{ roomManager: RoomManager }> => {
       if (!config.enabled) {
@@ -162,7 +165,12 @@ const stimmVoicePlugin = {
             respond(true, session ? sessionPayload(session) : { found: false });
           } else {
             const sessions = rt.roomManager.listSessions().map(sessionPayload);
-            respond(true, { sessions });
+            respond(true, {
+              sessions,
+              agent: agentProcess
+                ? { running: agentProcess.running, pid: agentProcess.pid }
+                : { running: false, pid: null },
+            });
           }
         } catch (err) {
           sendError(respond, err);
@@ -277,6 +285,9 @@ const stimmVoicePlugin = {
               }
               return json({
                 sessions: rt.roomManager.listSessions().map(sessionPayload),
+                agent: agentProcess
+                  ? { running: agentProcess.running, pid: agentProcess.pid }
+                  : { running: false, pid: null },
               });
             }
 
@@ -318,8 +329,58 @@ const stimmVoicePlugin = {
             `[stimm-voice] Failed to start: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
+
+        // Auto-spawn the Python voice agent if configured.
+        if (config.voiceAgent.spawn.autoSpawn) {
+          const extensionDir = resolve(dirname(api.source));
+          const pythonPath =
+            config.voiceAgent.spawn.pythonPath ||
+            AgentProcess.resolveDefaultPythonPath(extensionDir);
+          const agentScript =
+            config.voiceAgent.spawn.agentScript ||
+            AgentProcess.resolveDefaultAgentScript(extensionDir);
+
+          // Forward per-pipeline provider config as STIMM_* env vars.
+          const env: Record<string, string> = {
+            STIMM_STT_PROVIDER: config.voiceAgent.stt.provider,
+            STIMM_STT_MODEL: config.voiceAgent.stt.model,
+            STIMM_TTS_PROVIDER: config.voiceAgent.tts.provider,
+            STIMM_TTS_MODEL: config.voiceAgent.tts.model,
+            STIMM_TTS_VOICE: config.voiceAgent.tts.voice,
+            STIMM_LLM_PROVIDER: config.voiceAgent.llm.provider,
+            STIMM_LLM_MODEL: config.voiceAgent.llm.model,
+            STIMM_BUFFERING: config.voiceAgent.bufferingLevel,
+            STIMM_MODE: config.voiceAgent.mode,
+          };
+          // Per-pipeline API keys (only set if resolved).
+          if (config.voiceAgent.stt.apiKey) env.STIMM_STT_API_KEY = config.voiceAgent.stt.apiKey;
+          if (config.voiceAgent.tts.apiKey) env.STIMM_TTS_API_KEY = config.voiceAgent.tts.apiKey;
+          if (config.voiceAgent.llm.apiKey) env.STIMM_LLM_API_KEY = config.voiceAgent.llm.apiKey;
+          // Language (optional).
+          if (config.voiceAgent.stt.language) {
+            env.STIMM_STT_LANGUAGE = config.voiceAgent.stt.language;
+          }
+
+          agentProcess = new AgentProcess({
+            pythonPath,
+            agentScript,
+            livekitUrl: config.livekit.url,
+            livekitApiKey: config.livekit.apiKey,
+            livekitApiSecret: config.livekit.apiSecret,
+            env,
+            maxRestarts: config.voiceAgent.spawn.maxRestarts,
+            logger: api.logger,
+          });
+          agentProcess.start();
+        }
       },
       stop: async () => {
+        // Stop the Python agent first.
+        if (agentProcess) {
+          agentProcess.stop();
+          agentProcess = null;
+        }
+
         if (!roomManagerPromise) return;
         try {
           const rm = await roomManagerPromise;
