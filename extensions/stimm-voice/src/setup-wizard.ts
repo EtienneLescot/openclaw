@@ -40,7 +40,7 @@ function deepSet(obj: Record<string, unknown>, path: string[], value: unknown): 
  * Batch-write multiple config keys into ~/.openclaw/openclaw.json.
  * Reads once, deep-merges, writes once.
  */
-function saveConfig(entries: Record<string, string>): void {
+function saveConfig(entries: Record<string, unknown>): void {
   const configPath = join(homedir(), ".openclaw", "openclaw.json");
   let config: Record<string, unknown> = {};
   if (existsSync(configPath)) {
@@ -420,8 +420,8 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
   s.start("Saving configuration...");
 
   try {
-    const entries: Record<string, string> = {
-      enabled: "true",
+    const entries: Record<string, unknown> = {
+      enabled: true,
       "voiceAgent.stt.provider": sttProvider,
       "voiceAgent.stt.model": String(sttModel),
       "voiceAgent.tts.provider": ttsProvider,
