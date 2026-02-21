@@ -61,10 +61,6 @@ LLM_PROVIDERS: dict[str, str] = {
     "google": "livekit.plugins.google",
     "groq": "livekit.plugins.groq",
     "azure": "livekit.plugins.azure",
-    "cerebras": "livekit.plugins.cerebras",
-    "fireworks": "livekit.plugins.fireworks",
-    "together": "livekit.plugins.together",
-    "sambanova": "livekit.plugins.sambanova",
 }
 
 
