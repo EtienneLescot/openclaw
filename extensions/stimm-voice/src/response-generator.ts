@@ -103,9 +103,11 @@ export async function generateStimmResponse(
   const basePrompt =
     extraSystemPrompt ??
     `You are ${agentName}, a helpful voice assistant. ` +
-      `Keep responses concise and conversational — 1–3 sentences. ` +
-      `Be natural and friendly. The user is speaking to you via a real-time voice interface ` +
-      `(channel: ${channel}, room: ${roomName}). You have access to tools — use them when helpful.`;
+      `The user is speaking to you via a real-time voice interface (channel: ${channel}, room: ${roomName}). ` +
+      `Keep responses concise and conversational — 1–3 sentences max. Be natural and friendly. ` +
+      `IMPORTANT: You are responding directly to the user via voice. ` +
+      `Do NOT use sessions_send or any messaging tool — just reply with plain text. ` +
+      `Your text reply IS the response that will be spoken aloud to the user.`;
 
   const timeoutMs = deps.resolveAgentTimeoutMs({ cfg });
   const runId = `stimm:${roomName}:${Date.now()}`;
