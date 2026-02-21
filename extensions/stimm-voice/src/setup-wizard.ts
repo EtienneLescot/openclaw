@@ -168,6 +168,16 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
     return;
   }
 
+  const sttLanguage = (await c.text({
+    message: "STT language code (e.g. fr, en-US, es) — leave blank to use provider default",
+    placeholder: "fr",
+  })) as string | symbol;
+
+  if (isCancel(sttLanguage)) {
+    c.outro("Setup cancelled.");
+    return;
+  }
+
   const sttEnvName = providerEnvVar(sttProvider);
   const sttEnvValue = sttEnvName ? process.env[sttEnvName] : undefined;
   let sttApiKey: string | symbol = "";
@@ -431,6 +441,7 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
       "voiceAgent.llm.model": String(llmModel),
     };
     if (sttApiKey) entries["voiceAgent.stt.apiKey"] = String(sttApiKey);
+    if (sttLanguage) entries["voiceAgent.stt.language"] = String(sttLanguage);
     if (ttsApiKey) entries["voiceAgent.tts.apiKey"] = String(ttsApiKey);
     if (llmApiKey) entries["voiceAgent.llm.apiKey"] = String(llmApiKey);
     if (livekitUrl) entries["livekit.url"] = livekitUrl;

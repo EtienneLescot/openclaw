@@ -371,10 +371,14 @@
 
         // 2. Resolve the LiveKit WebSocket URL.
         //    Allow override via ?livekit= query param (e.g. ngrok tunnel).
+        //    When served over HTTPS, use wss:// and port 7443 (TLS proxy in front of LiveKit).
+        //    When served over HTTP (localhost dev), use ws:// and port 7880 directly.
         const params = new URLSearchParams(window.location.search);
         const livekitOverride = params.get("livekit");
-        const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-        const livekitUrl = livekitOverride || `${wsProtocol}//${window.location.hostname}:7880`;
+        const isSecure = window.location.protocol === "https:";
+        const wsProtocol = isSecure ? "wss:" : "ws:";
+        const livekitPort = isSecure ? "7443" : "7880";
+        const livekitUrl = livekitOverride || `${wsProtocol}//${window.location.hostname}:${livekitPort}`;
 
         // 3. Connect to the LiveKit room.
         room = new LivekitClient.Room({
