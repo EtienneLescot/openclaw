@@ -8,8 +8,10 @@ rtc:
   # UDP port range (single port to keep Docker port-mapping simple).
   port_range_start: 7881
   port_range_end: 7881
-  # Advertise 127.0.0.1 so clients on the host can reach us via port-forward.
-  node_ip: 127.0.0.1
+  # Advertise the host LAN IP so both local Firefox and phones on the same
+  # network can reach LiveKit via Docker's port mapping (7881 → container).
+  # 127.0.0.1 only works for Node/Python on the host; phones need the LAN IP.
+  node_ip: 192.168.1.195
   use_external_ip: false
   # Prefer ICE Lite for simpler negotiation through NAT/Docker.
   use_ice_lite: true
