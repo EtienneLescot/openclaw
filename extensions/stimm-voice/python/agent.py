@@ -179,7 +179,11 @@ async def entrypoint(ctx: JobContext) -> None:
     await session.start(agent=agent, room=ctx.room)
     # Keep the entrypoint alive until the room disconnects.
     disconnect = asyncio.Event()
-    ctx.add_shutdown_callback(lambda: disconnect.set())
+
+    async def _on_shutdown() -> None:
+        disconnect.set()
+
+    ctx.add_shutdown_callback(_on_shutdown)
     await disconnect.wait()
 
 

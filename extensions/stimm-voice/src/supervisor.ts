@@ -160,7 +160,11 @@ export class OpenClawSupervisor {
           speak: true,
           priority: "normal",
         });
-        this.deps.logger.debug?.(`[stimm-voice] Instruction sent: "${response.slice(0, 80)}..."`);
+        this.deps.logger.info(`[stimm-voice] Instruction sent: "${response.slice(0, 120)}"`);
+      } else {
+        this.deps.logger.warn(
+          `[stimm-voice] Empty response from agent for: "${text.slice(0, 60)}"`,
+        );
       }
     } catch (err) {
       this.deps.logger.error(
