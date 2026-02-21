@@ -60,6 +60,8 @@ export class RoomManager {
     });
 
     // Create and connect the OpenClaw supervisor.
+    // Connection is non-blocking — the session works (browser ↔ Python agent)
+    // even if the supervisor can't establish its WebRTC data channel immediately.
     const supervisorOpts: SupervisorOptions = {
       livekitUrl: this.livekit.url,
       token: supervisorToken,
@@ -67,7 +69,12 @@ export class RoomManager {
       originChannel: opts.originChannel,
     };
     const supervisor = new OpenClawSupervisor(this.supervisorDeps, supervisorOpts);
-    await supervisor.connect();
+    supervisor.connect().catch((err) => {
+      this.logger.warn(
+        `[stimm-voice] Supervisor failed to connect to ${roomName}: ${err instanceof Error ? err.message : String(err)}. ` +
+          "Voice session is active but OpenClaw reasoning bridge is offline.",
+      );
+    });
 
     // Generate client token (audio + data).
     const clientToken = await this.generateToken({
