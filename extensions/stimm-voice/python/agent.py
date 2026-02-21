@@ -93,6 +93,8 @@ def _make_stt() -> Any:
         kwargs["api_key"] = api_key
     if language:
         kwargs["language"] = language
+    # detect_language is NOT supported in streaming mode by livekit-plugins-deepgram;
+    # set an explicit language code via STIMM_STT_LANGUAGE or voiceAgent.stt.language.
     return mod.STT(**kwargs)
 
 
@@ -104,7 +106,12 @@ def _make_tts() -> Any:
     api_key = os.environ.get("STIMM_TTS_API_KEY")
 
     mod = _load_plugin(TTS_PROVIDERS, provider)
-    kwargs: dict[str, Any] = {"model": model, "voice": voice}
+    kwargs: dict[str, Any] = {"model": model}
+    # ElevenLabs uses `voice_id`; most other providers use `voice`.
+    if provider == "elevenlabs":
+        kwargs["voice_id"] = voice
+    else:
+        kwargs["voice"] = voice
     if api_key:
         kwargs["api_key"] = api_key
     return mod.TTS(**kwargs)
@@ -133,6 +140,7 @@ def make_agent() -> VoiceAgent:
         mode=os.environ.get("STIMM_MODE", "hybrid"),  # type: ignore[arg-type]
         instructions=(
             "You are a friendly and helpful voice assistant for OpenClaw. "
+            "Always respond in the same language the user is speaking. "
             "Keep responses concise and conversational. "
             "When the supervisor sends you instructions, incorporate them naturally. "
             "If you don't have enough information, ask clarifying questions."
@@ -141,18 +149,34 @@ def make_agent() -> VoiceAgent:
 
 
 async def entrypoint(ctx: JobContext) -> None:
-    # Use TRANSPORT_NOHOST to skip host ICE candidates — they cause failures
-    # in WSL2/Docker because the container's internal IPs aren't reachable.
-    # Server-reflexive and relay (TURN) candidates still work via mapped ports.
+    # Use TRANSPORT_ALL so the Python agent can reach LiveKit via the host IP
+    # (192.168.1.x / 127.0.0.1). TRANSPORT_NOHOST blocked all host candidates
+    # which made the PeerConnection time out when node_ip is the LAN IP.
     from livekit.rtc import RtcConfiguration, IceTransportType
 
     rtc_config = RtcConfiguration(
-        ice_transport_type=IceTransportType.TRANSPORT_NOHOST,
+        ice_transport_type=IceTransportType.TRANSPORT_ALL,
     )
 
     await ctx.connect(rtc_config=rtc_config)
+    agent = make_agent()
+
+    # Bind the Stimm protocol to the LiveKit room so data channel messages
+    # can be sent/received (transcripts out → supervisor, instructions in).
+    agent.protocol.bind(ctx.room)
+
     session = AgentSession()
-    await session.start(agent=make_agent(), room=ctx.room)
+
+    # Forward STT transcripts to the supervisor via the Stimm protocol.
+    # The supervisor (Node side) will process them through the OpenClaw pipeline
+    # and send back instructions which VoiceAgent.on_enter() already handles.
+    @session.on("user_input_transcribed")
+    def _on_transcript(ev) -> None:  # type: ignore[no-untyped-def]
+        asyncio.ensure_future(
+            agent.publish_transcript(ev.transcript, partial=not ev.is_final)
+        )
+
+    await session.start(agent=agent, room=ctx.room)
     # Keep the entrypoint alive until the room disconnects.
     disconnect = asyncio.Event()
     ctx.add_shutdown_callback(lambda: disconnect.set())

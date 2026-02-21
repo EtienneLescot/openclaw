@@ -69,14 +69,14 @@ export class NodeSupervisorClient {
 
   async connect(): Promise<void> {
     this.room.on(RoomEvent.DataReceived, this.onData.bind(this));
-    // Use TRANSPORT_NOHOST to skip host ICE candidates — they contain
-    // container-internal IPs (172.x.x.x) that are unreachable from WSL2.
-    // Server-reflexive and TURN relay candidates work via Docker port mapping.
+    // Use TRANSPORT_ALL so the Node supervisor can reach LiveKit via loopback
+    // (ws://localhost:7880). TRANSPORT_NOHOST was blocking host candidates
+    // including 127.0.0.1, causing publisher connection timeouts.
     await this.room.connect(this.url, this.token, {
       autoSubscribe: true,
       dynacast: false,
       rtcConfig: {
-        iceTransportType: IceTransportType.TRANSPORT_NOHOST,
+        iceTransportType: IceTransportType.TRANSPORT_ALL,
       },
     });
     this._connected = true;

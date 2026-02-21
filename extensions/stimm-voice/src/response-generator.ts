@@ -81,8 +81,15 @@ export async function generateStimmResponse(
   const sessionId = sessionEntry.sessionId;
   const sessionFile = deps.resolveSessionFilePath(sessionId, sessionEntry, { agentId });
 
-  // Resolve model from param or config defaults.
-  const modelRef = params.model ?? `${deps.DEFAULT_PROVIDER}/${deps.DEFAULT_MODEL}`;
+  // Resolve model from param → agent config primary model → core defaults.
+  // Prefer the configured primary model so the voice lane uses the same
+  // provider the user already set up (e.g. openrouter/gemini) rather than
+  // falling back to the hardcoded anthropic default.
+  const configuredPrimary = (
+    cfg as Record<string, unknown> & { agents?: { defaults?: { model?: { primary?: string } } } }
+  )?.agents?.defaults?.model?.primary;
+  const modelRef =
+    params.model ?? configuredPrimary ?? `${deps.DEFAULT_PROVIDER}/${deps.DEFAULT_MODEL}`;
   const slashIdx = modelRef.indexOf("/");
   const provider = slashIdx === -1 ? deps.DEFAULT_PROVIDER : modelRef.slice(0, slashIdx);
   const model = slashIdx === -1 ? modelRef : modelRef.slice(slashIdx + 1);
