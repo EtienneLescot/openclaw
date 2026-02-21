@@ -3,16 +3,23 @@
 
 port: 7880
 rtc:
+  # Explicit ICE TCP port — critical for WSL2/Docker where UDP can be flaky.
+  tcp_port: 7881
+  # UDP port range (single port to keep Docker port-mapping simple).
   port_range_start: 7881
   port_range_end: 7881
-  # Advertise 127.0.0.1 so browsers on the host can reach us via port-forward.
+  # Advertise 127.0.0.1 so clients on the host can reach us via port-forward.
   node_ip: 127.0.0.1
   use_external_ip: false
-  # Enable TURN relay so connections work even through NAT/WSL2.
-  turn_servers:
-    - host: 0.0.0.0
-      port: 7882
-      protocol: udp
+  # Prefer ICE Lite for simpler negotiation through NAT/Docker.
+  use_ice_lite: true
+  # NOTE: We intentionally omit turn_servers here.
+  # LiveKit's built-in TURN relay sends TURN URLs to clients without credentials
+  # unless an external TURN server with explicit username/password is configured.
+  # This causes "TURN server with empty username or password" in the WebRTC ICE
+  # parser, which makes CreatePeerConnectionOrError fail.
+  # For local dev (client and server on the same host/Docker network), ICE
+  # TCP + ICE Lite is sufficient — no TURN relay needed.
 
 keys:
   devkey: secret
