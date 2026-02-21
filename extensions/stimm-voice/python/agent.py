@@ -145,7 +145,16 @@ def make_agent() -> VoiceAgent:
 
 
 async def entrypoint(ctx: JobContext) -> None:
-    await ctx.connect()
+    # Use TRANSPORT_NOHOST to skip host ICE candidates — they cause failures
+    # in WSL2/Docker because the container's internal IPs aren't reachable.
+    # Server-reflexive and relay (TURN) candidates still work via mapped ports.
+    from livekit.rtc import RtcConfiguration, IceTransportType
+
+    rtc_config = RtcConfiguration(
+        ice_transport_type=IceTransportType.TRANSPORT_NOHOST,
+    )
+
+    await ctx.connect(rtc_config=rtc_config)
     session = AgentSession()
     await session.start(agent=make_agent(), room=ctx.room)
     # Keep the entrypoint alive until the room disconnects.

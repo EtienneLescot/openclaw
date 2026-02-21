@@ -9,7 +9,7 @@
  * server-side / Node.js environments where WebRTC APIs are not available.
  */
 
-import { Room, RoomEvent, dispose } from "@livekit/rtc-node";
+import { Room, RoomEvent, dispose, IceTransportType } from "@livekit/rtc-node";
 import type {
   TranscriptMessage,
   StateMessage,
@@ -69,7 +69,16 @@ export class NodeSupervisorClient {
 
   async connect(): Promise<void> {
     this.room.on(RoomEvent.DataReceived, this.onData.bind(this));
-    await this.room.connect(this.url, this.token, { autoSubscribe: true, dynacast: false });
+    // Use TRANSPORT_NOHOST to skip host ICE candidates — they contain
+    // container-internal IPs (172.x.x.x) that are unreachable from WSL2.
+    // Server-reflexive and TURN relay candidates work via Docker port mapping.
+    await this.room.connect(this.url, this.token, {
+      autoSubscribe: true,
+      dynacast: false,
+      rtcConfig: {
+        iceTransportType: IceTransportType.TRANSPORT_NOHOST,
+      },
+    });
     this._connected = true;
   }
 
