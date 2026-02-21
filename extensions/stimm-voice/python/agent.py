@@ -139,11 +139,22 @@ def make_agent() -> VoiceAgent:
         buffering_level=os.environ.get("STIMM_BUFFERING", "MEDIUM"),  # type: ignore[arg-type]
         mode=os.environ.get("STIMM_MODE", "hybrid"),  # type: ignore[arg-type]
         instructions=(
-            "You are a friendly and helpful voice assistant for OpenClaw. "
-            "Always respond in the same language the user is speaking. "
-            "Keep responses concise and conversational. "
-            "When the supervisor sends you instructions, incorporate them naturally. "
-            "If you don't have enough information, ask clarifying questions."
+            "You are a voice assistant working with a supervisor AI. "
+            "You handle the live conversation while the supervisor researches answers.\n\n"
+            "Rules:\n"
+            "1. Always respond in the SAME LANGUAGE the user is speaking.\n"
+            "2. Keep your responses short and natural (1-2 sentences).\n"
+            "3. NEVER invent facts, names, technical details, or specific answers. "
+            "If you don't know, acknowledge and say you're checking.\n"
+            "4. When supervisor instructions appear in your context, "
+            "relay the information FAITHFULLY to the user. This is the real answer — "
+            "present it naturally as your own knowledge.\n"
+            "5. You CAN have natural conversation: greet, acknowledge, ask follow-ups, "
+            "confirm understanding. The user may ask multiple things in a row — "
+            "that's fine, acknowledge each one.\n"
+            "6. If the user asks something you can clearly answer (greetings, "
+            "simple chat, clarification questions), answer directly. "
+            "Only defer to the supervisor for factual/technical questions."
         ),
     )
 
@@ -161,22 +172,44 @@ async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect(rtc_config=rtc_config)
     agent = make_agent()
 
-    # Bind the Stimm protocol to the LiveKit room so data channel messages
-    # can be sent/received (transcripts out → supervisor, instructions in).
-    agent.protocol.bind(ctx.room)
-
     session = AgentSession()
 
     # Forward STT transcripts to the supervisor via the Stimm protocol.
-    # The supervisor (Node side) will process them through the OpenClaw pipeline
-    # and send back instructions which VoiceAgent.on_enter() already handles.
+    # The supervisor (Node side) buffers the conversation and periodically
+    # sends batches to the big LLM.
     @session.on("user_input_transcribed")
     def _on_transcript(ev) -> None:  # type: ignore[no-untyped-def]
         asyncio.ensure_future(
             agent.publish_transcript(ev.transcript, partial=not ev.is_final)
         )
 
+    # Custom instruction handler: when the big LLM has a real answer,
+    # interrupt whatever the small LLM is saying and speak it immediately.
+    # This is safe because the buffer architecture ensures only one
+    # instruction per batch — no cascading interrupts.
+    #
+    # Override Stimm's internal _handle_instruction to a no-op to prevent
+    # double-speak (internal handler also speaks on interrupt priority).
+    from stimm.protocol import InstructionMessage
+
+    async def _noop_instruction(msg: InstructionMessage) -> None:
+        pass
+
+    agent._handle_instruction = _noop_instruction  # type: ignore[assignment]
+
+    async def _on_instruction(msg: InstructionMessage) -> None:
+        if msg.speak and msg.text:
+            if msg.priority == "interrupt":
+                await session.interrupt()
+            await session.say(msg.text, allow_interruptions=True)
+
+    agent.protocol.on_instruction(_on_instruction)
+
     await session.start(agent=agent, room=ctx.room)
+
+    # Bind the Stimm protocol after session.start() so the room is fully
+    # initialised before we open the data channel.
+    agent.protocol.bind(ctx.room)
     # Keep the entrypoint alive until the room disconnects.
     disconnect = asyncio.Event()
 
