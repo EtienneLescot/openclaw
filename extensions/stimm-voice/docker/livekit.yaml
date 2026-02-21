@@ -1,0 +1,21 @@
+# LiveKit dev config — works in Docker-on-WSL2 and native Docker.
+# Mounted by docker-compose.dev.yml.
+
+port: 7880
+rtc:
+  port_range_start: 7881
+  port_range_end: 7881
+  # Advertise 127.0.0.1 so browsers on the host can reach us via port-forward.
+  node_ip: 127.0.0.1
+  use_external_ip: false
+  # Enable TURN relay so connections work even through NAT/WSL2.
+  turn_servers:
+    - host: 0.0.0.0
+      port: 7882
+      protocol: udp
+
+keys:
+  devkey: secret
+
+logging:
+  level: info
