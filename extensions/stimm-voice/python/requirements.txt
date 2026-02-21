@@ -1,1 +1,32 @@
-stimm[deepgram,openai]>=0.1.0
+# Core agent framework
+livekit-agents==1.4.2
+
+# VAD (voice activity detection) — always required
+livekit-plugins-silero==1.4.2
+
+# STT providers
+livekit-plugins-deepgram==1.4.2
+livekit-plugins-assemblyai==1.4.2
+livekit-plugins-speechmatics==1.4.2
+livekit-plugins-clova==1.4.2
+livekit-plugins-fal==1.4.2
+
+# TTS providers
+livekit-plugins-elevenlabs==1.4.2
+livekit-plugins-cartesia==1.4.2
+livekit-plugins-playai==1.4.2
+livekit-plugins-rime==1.4.2
+
+# LLM providers
+livekit-plugins-anthropic==1.4.2
+livekit-plugins-groq==1.4.2
+livekit-plugins-cerebras==1.4.2
+livekit-plugins-fireworks==1.4.2
+livekit-plugins-together==1.4.2
+livekit-plugins-sambanova==1.4.2
+
+# Multi-role providers (STT + TTS + LLM)
+livekit-plugins-openai==1.4.2
+livekit-plugins-google==1.4.2
+livekit-plugins-azure==1.4.2
+livekit-plugins-aws==1.4.2
