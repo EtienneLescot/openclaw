@@ -11,7 +11,9 @@ services:
     command: --config /etc/livekit.yaml --bind 0.0.0.0
     ports:
       - "7880:7880"   # WebSocket + HTTP
-      - "7881:7881/udp" # RTC (WebRTC)
-      - "7882:7882/udp" # TURN
+      - "7881:7881/tcp" # RTC (WebRTC TCP)
+      - "7881:7881/udp" # RTC (WebRTC UDP)
+      - "7882:7882/tcp" # TURN TCP
+      - "7882:7882/udp" # TURN UDP
     volumes:
       - ./livekit.yaml:/etc/livekit.yaml:ro
