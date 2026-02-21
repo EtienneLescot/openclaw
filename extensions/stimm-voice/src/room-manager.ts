@@ -51,8 +51,10 @@ export class RoomManager {
     this.logger.info(`[stimm-voice] Created LiveKit room: ${roomName}`);
 
     // Generate supervisor token (data-only, no audio).
+    // Use a room-scoped identity so parallel sessions don't collide
+    // with DUPLICATE_IDENTITY and kick each other's agent jobs.
     const supervisorToken = await this.generateToken({
-      identity: "stimm-supervisor",
+      identity: `stimm-supervisor-${roomName}`,
       roomName,
       canPublish: false,
       canSubscribe: true,
