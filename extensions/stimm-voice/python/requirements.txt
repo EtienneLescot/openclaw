@@ -14,19 +14,19 @@ livekit-plugins-fal==1.4.2
 # TTS providers
 livekit-plugins-elevenlabs==1.4.2
 livekit-plugins-cartesia==1.4.2
-livekit-plugins-playai==1.4.2
-livekit-plugins-rime==1.4.2
+livekit-plugins-playai>=1.2.15
+livekit-plugins-rime>=0.3.0
 
 # LLM providers
 livekit-plugins-anthropic==1.4.2
-livekit-plugins-groq==1.4.2
-livekit-plugins-cerebras==1.4.2
-livekit-plugins-fireworks==1.4.2
-livekit-plugins-together==1.4.2
-livekit-plugins-sambanova==1.4.2
+livekit-plugins-groq>=0.3.0
+livekit-plugins-cerebras>=0.1.0
+livekit-plugins-fireworks>=0.1.0
+livekit-plugins-together>=0.1.0
+livekit-plugins-sambanova>=0.1.0
 
 # Multi-role providers (STT + TTS + LLM)
 livekit-plugins-openai==1.4.2
 livekit-plugins-google==1.4.2
 livekit-plugins-azure==1.4.2
-livekit-plugins-aws==1.4.2
+livekit-plugins-aws>=0.1.0
