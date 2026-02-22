@@ -128,15 +128,19 @@ describe("OpenClawSupervisor", () => {
         confidence: 0.98,
       });
 
-      expect(processMessage).toHaveBeenCalledWith("What is the weather?", {
+      // Advance past quietMs (2500ms) + loop interval (1500ms).
+      await vi.advanceTimersByTimeAsync(4500);
+
+      expect(processMessage).toHaveBeenCalledWith(expect.stringContaining("What is the weather?"), {
         roomName: "test-room",
         channel: "web",
       });
-      expect(mockInstruct).toHaveBeenCalledWith({
-        text: "Here is my answer",
-        speak: true,
-        priority: "normal",
-      });
+      expect(mockAddContext).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining("[SPEAK_EXACTLY]"),
+        }),
+      );
+      expect(mockInstruct).not.toHaveBeenCalled();
     });
 
     it("accumulates partial transcripts and debounces", async () => {
@@ -165,10 +169,10 @@ describe("OpenClawSupervisor", () => {
       // Not processed yet (still within debounce window).
       expect(processMessage).not.toHaveBeenCalled();
 
-      // Advance past debounce timeout (300ms).
-      await vi.advanceTimersByTimeAsync(400);
+      // Advance past debounce (400ms) + quietMs (2500ms) + loop interval (1500ms).
+      await vi.advanceTimersByTimeAsync(4500);
 
-      expect(processMessage).toHaveBeenCalledWith("What is the", {
+      expect(processMessage).toHaveBeenCalledWith(expect.stringContaining("What is the"), {
         roomName: "test-room",
         channel: "web",
       });
@@ -205,6 +209,8 @@ describe("OpenClawSupervisor", () => {
         confidence: 0.9,
       });
 
+      await vi.advanceTimersByTimeAsync(4500);
+
       expect(processMessage).toHaveBeenCalled();
       expect(mockInstruct).not.toHaveBeenCalled();
     });
@@ -226,24 +232,13 @@ describe("OpenClawSupervisor", () => {
         confidence: 0.9,
       });
 
+      await vi.advanceTimersByTimeAsync(4500);
+
       expect(deps.logger.error).toHaveBeenCalledWith(expect.stringContaining("agent broke"));
     });
   });
 
   describe("direct commands", () => {
-    it("instruct() sends instruction via protocol client", async () => {
-      const deps = createDeps();
-      const sup = new OpenClawSupervisor(deps, defaultOpts);
-      await sup.connect();
-
-      await sup.instruct("Say hello", { speak: true, priority: "interrupt" });
-      expect(mockInstruct).toHaveBeenCalledWith({
-        text: "Say hello",
-        speak: true,
-        priority: "interrupt",
-      });
-    });
-
     it("addContext() sends context via protocol client", async () => {
       const deps = createDeps();
       const sup = new OpenClawSupervisor(deps, defaultOpts);

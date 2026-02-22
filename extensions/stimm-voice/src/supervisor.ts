@@ -75,7 +75,7 @@ export class OpenClawSupervisor {
   /** How often the loop checks for unprocessed entries (ms). */
   private loopIntervalMs = 1_500;
   /** Minimum quiet time after last user turn before processing (ms). */
-  private quietMs = 1_200;
+  private quietMs = 2_500;
   private processing = false;
 
   /** Timestamp of the last user turn added to the buffer. */
@@ -281,44 +281,23 @@ export class OpenClawSupervisor {
       return;
     }
 
-    // Send the full conversation context so the small LLM can stay
-    // consistent on future turns.
+    // Everything goes through context — the small LLM is the only one who
+    // ever speaks. [SPEAK_EXACTLY] tells the small LLM to relay the answer
+    // verbatim right now; plain context is absorbed silently.
     const fullContext = this.buffer
       .slice(-20)
       .map((e) => `[${e.role === "user" ? "User" : "Assistant"}]: ${e.text}`)
       .join("\n");
 
     await this.client.addContext({
-      text: `Recent conversation:\n${fullContext}\n\nSupervisor answer: ${response}`,
+      text: `Recent conversation:\n${fullContext}\n\n` + `[SPEAK_EXACTLY]:\n${response}`,
       append: false, // Replace — always send the latest snapshot.
     });
 
-    // Send the answer as an interrupt instruction — cut the small LLM's
-    // filler and speak the real answer immediately.  This is safe with the
-    // buffer architecture: the big LLM processes once per batch (not per
-    // utterance), so we won't get cascading interrupts.
-    await this.client.instruct({
-      text: response,
-      speak: true,
-      priority: "interrupt",
-    });
-
-    this.deps.logger.info(`[stimm-voice] Instruction sent: "${response.slice(0, 120)}"`);
+    this.deps.logger.info(`[stimm-voice] Context updated with answer: "${response.slice(0, 120)}"`);
   }
 
   // -- Direct commands (for tools / gateway methods) ------------------------
-
-  /** Send a text instruction to the voice agent. */
-  async instruct(
-    text: string,
-    opts?: { speak?: boolean; priority?: "normal" | "interrupt" },
-  ): Promise<void> {
-    await this.client.instruct({
-      text,
-      speak: opts?.speak ?? true,
-      priority: opts?.priority ?? "normal",
-    });
-  }
 
   /** Add context to the voice agent's working memory. */
   async addContext(text: string, opts?: { append?: boolean }): Promise<void> {
