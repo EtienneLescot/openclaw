@@ -80,6 +80,10 @@ describe("config", () => {
       // Web
       expect(cfg.web.enabled).toBe(true);
       expect(cfg.web.path).toBe("/voice");
+      // Tunnel
+      expect(cfg.tunnel.provider).toBe("none");
+      expect(cfg.tunnel.gatewayFunnelPort).toBe(443);
+      expect(cfg.tunnel.livekitFunnelPort).toBe(8443);
     });
 
     it("accepts null/undefined/non-object input gracefully", () => {

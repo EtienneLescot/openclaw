@@ -17,6 +17,7 @@ import type { CoreConfig } from "./src/core-bridge.js";
 import { generateStimmResponse } from "./src/response-generator.js";
 import { RoomManager, type VoiceSession } from "./src/room-manager.js";
 import type { SupervisorDeps } from "./src/supervisor.js";
+import { setupTunnel, cleanupTunnel, type TunnelInfo } from "./src/tunnel.js";
 
 // ---------------------------------------------------------------------------
 // Tool schema — flat object, no Type.Union (per repo guardrails).
@@ -77,6 +78,7 @@ const stimmVoicePlugin = {
     let roomManager: RoomManager | null = null;
     let roomManagerPromise: Promise<RoomManager> | null = null;
     let agentProcess: AgentProcess | null = null;
+    let tunnelInfo: TunnelInfo | null = null;
 
     const ensureRuntime = async (): Promise<{ roomManager: RoomManager }> => {
       if (!config.enabled) {
@@ -105,7 +107,7 @@ const stimmVoicePlugin = {
             roomName: typeof params?.room === "string" ? params.room : undefined,
             originChannel: typeof params?.channel === "string" ? params.channel : "web",
           });
-          respond(true, sessionPayload(session));
+          respond(true, sessionPayload(session, tunnelInfo));
         } catch (err) {
           sendError(respond, err);
         }
@@ -163,7 +165,7 @@ const stimmVoicePlugin = {
           const room = typeof params?.room === "string" ? params.room.trim() : "";
           if (room) {
             const session = rt.roomManager.getSession(room);
-            respond(true, session ? sessionPayload(session) : { found: false });
+            respond(true, session ? sessionPayload(session, tunnelInfo) : { found: false });
           } else {
             const sessions = rt.roomManager.listSessions().map(sessionPayload);
             respond(true, {
@@ -233,7 +235,7 @@ const stimmVoicePlugin = {
                 roomName: typeof params.room === "string" ? params.room : undefined,
                 originChannel: typeof params.channel === "string" ? params.channel : "web",
               });
-              return json(sessionPayload(session));
+              return json(sessionPayload(session, tunnelInfo));
             }
 
             case "end_session": {
@@ -282,7 +284,7 @@ const stimmVoicePlugin = {
               const room = typeof params.room === "string" ? params.room.trim() : "";
               if (room) {
                 const session = rt.roomManager.getSession(room);
-                return json(session ? sessionPayload(session) : { found: false });
+                return json(session ? sessionPayload(session, tunnelInfo) : { found: false });
               }
               return json({
                 sessions: rt.roomManager.listSessions().map(sessionPayload),
@@ -376,8 +378,20 @@ const stimmVoicePlugin = {
           });
           agentProcess.start();
         }
+
+        // Set up tunnel (Tailscale Funnel) if configured.
+        if (config.tunnel.provider !== "none") {
+          const gatewayPort =
+            (api.config as Record<string, unknown> & { gateway?: { port?: number } }).gateway
+              ?.port ?? 18789;
+          tunnelInfo = await setupTunnel(config, gatewayPort, api.logger);
+        }
       },
       stop: async () => {
+        // Clean up tunnel routes.
+        await cleanupTunnel(config);
+        tunnelInfo = null;
+
         // Stop the Python agent first.
         if (agentProcess) {
           agentProcess.stop();
@@ -410,7 +424,7 @@ const stimmVoicePlugin = {
                 originChannel: "web",
               });
               res.writeHead(200, { "Content-Type": "application/json" });
-              res.end(JSON.stringify(sessionPayload(session)));
+              res.end(JSON.stringify(sessionPayload(session, tunnelInfo)));
             } catch (err) {
               res.writeHead(500, { "Content-Type": "application/json" });
               res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
@@ -483,12 +497,14 @@ async function initRoomManager(
 }
 
 /** Serialize a VoiceSession for gateway/tool responses (omit internals). */
-function sessionPayload(session: VoiceSession) {
+function sessionPayload(session: VoiceSession, tunnel?: TunnelInfo | null) {
   return {
     room: session.roomName,
     clientToken: session.clientToken,
     channel: session.originChannel,
     createdAt: session.createdAt,
     supervisorConnected: session.supervisor.connected,
+    // Pass the public LiveKit URL so the web UI uses the tunnel instead of guessing.
+    ...(tunnel?.livekitUrl ? { livekitUrl: tunnel.livekitUrl } : {}),
   };
 }

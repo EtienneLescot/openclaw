@@ -134,11 +134,28 @@ export const WebConfigSchema = z.object({
   path: z.string().default("/voice"),
 });
 
+// ---------------------------------------------------------------------------
+// Tunnel — expose the gateway + LiveKit publicly via Tailscale Funnel.
+// ---------------------------------------------------------------------------
+
+export const TUNNEL_PROVIDERS = ["none", "tailscale-funnel"] as const;
+export type TunnelProvider = (typeof TUNNEL_PROVIDERS)[number];
+
+export const TunnelConfigSchema = z.object({
+  /** Tunnel provider. "none" = LAN-only, "tailscale-funnel" = public via Tailscale. */
+  provider: z.enum(TUNNEL_PROVIDERS).default("none"),
+  /** Tailscale Funnel port for the gateway (443, 8443, or 10000). */
+  gatewayFunnelPort: z.number().default(443),
+  /** Tailscale Funnel port for LiveKit signaling (443, 8443, or 10000). */
+  livekitFunnelPort: z.number().default(8443),
+});
+
 export const StimmVoiceConfigSchema = z.object({
   enabled: z.boolean().default(false),
   livekit: LiveKitConfigSchema.default(() => LiveKitConfigSchema.parse({})),
   voiceAgent: VoiceAgentConfigSchema.default(() => VoiceAgentConfigSchema.parse({})),
   web: WebConfigSchema.default(() => WebConfigSchema.parse({})),
+  tunnel: TunnelConfigSchema.default(() => TunnelConfigSchema.parse({})),
 });
 
 export type StimmVoiceConfig = z.infer<typeof StimmVoiceConfigSchema>;

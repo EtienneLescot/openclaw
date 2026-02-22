@@ -96,4 +96,44 @@ export function registerStimmVoiceCli(deps: VoiceCliDeps): void {
         extensionDir: deps.extensionDir ?? "",
       });
     });
+
+  const doctor = program.command("voice:doctor");
+  doctor.description("Check voice pipeline prerequisites").action(async () => {
+    const { getTailscaleStatus } = await import("./tunnel.js");
+
+    // Check Tailscale.
+    const ts = await getTailscaleStatus();
+    if (ts.installed) {
+      if (ts.loggedIn) {
+        logger.info(`  ✅ Tailscale: logged in (${ts.dnsName})`);
+      } else {
+        logger.info("  ⚠️  Tailscale: installed but not logged in — run `tailscale login`");
+      }
+    } else {
+      logger.info("  ❌ Tailscale: not installed — https://tailscale.com/download");
+    }
+
+    // Check tunnel config.
+    if (config.tunnel.provider === "tailscale-funnel") {
+      if (ts.loggedIn && ts.dnsName) {
+        const gwPort =
+          config.tunnel.gatewayFunnelPort === 443 ? "" : `:${config.tunnel.gatewayFunnelPort}`;
+        logger.info(`  ✅ Tunnel: Tailscale Funnel → https://${ts.dnsName}${gwPort}/voice`);
+      } else {
+        logger.info("  ⚠️  Tunnel: configured but Tailscale not ready");
+      }
+    } else {
+      logger.info("  ℹ️  Tunnel: none (LAN-only) — run `openclaw voice:setup` to enable");
+    }
+
+    // Check LiveKit config.
+    logger.info(`  ℹ️  LiveKit: ${config.livekit.url}`);
+
+    // Check plugin enabled.
+    if (config.enabled) {
+      logger.info("  ✅ Plugin: enabled");
+    } else {
+      logger.info("  ❌ Plugin: disabled — set stimm-voice.enabled=true");
+    }
+  });
 }
