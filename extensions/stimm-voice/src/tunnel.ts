@@ -281,28 +281,23 @@ export async function loginTailscale(): Promise<LoginResult> {
 // Funnel setup / teardown
 // ---------------------------------------------------------------------------
 
-interface FunnelRouteOpts {
-  port: number;
-  localUrl: string;
-  logger: TunnelLogger;
-}
-
-async function setupFunnelRoute(opts: FunnelRouteOpts): Promise<boolean> {
-  // tailscale funnel --bg --yes --set-path / <port> <localUrl>
-  // For port-specific funnel: tailscale funnel <port> <localUrl>
-  const args = ["funnel", "--bg", "--yes", String(opts.port), opts.localUrl];
+async function setupFunnelRoute(localPort: number, logger: TunnelLogger): Promise<boolean> {
+  // New syntax: tailscale funnel --bg <localPort>
+  // This always exposes on port 443 externally.
+  const args = ["funnel", "--bg", String(localPort)];
   const { code, stderr } = await runTailscaleCommand(args, 15_000);
   if (code !== 0) {
-    opts.logger.warn(
-      `[stimm-voice] Tailscale funnel setup failed for port ${opts.port}: ${stderr}`,
+    logger.warn(
+      `[stimm-voice] Tailscale funnel setup failed for local port ${localPort}: ${stderr}`,
     );
     return false;
   }
   return true;
 }
 
-async function cleanupFunnelRoute(port: number): Promise<void> {
-  await runTailscaleCommand(["funnel", "off", String(port)], 5000);
+async function cleanupFunnelRoute(): Promise<void> {
+  // Disable funnel on port 443 (the only external port supported).
+  await runTailscaleCommand(["funnel", "--https=443", "off"], 5000);
 }
 
 /**
@@ -333,54 +328,28 @@ export async function setupTunnel(
   }
 
   const { dnsName } = status;
-  const gwFunnelPort = config.tunnel.gatewayFunnelPort;
-  const lkFunnelPort = config.tunnel.livekitFunnelPort;
 
-  // Resolve local LiveKit port from the URL (ws://localhost:7880 → 7880).
-  const lkUrl = new URL(
-    config.livekit.url.replace("ws://", "http://").replace("wss://", "https://"),
-  );
-  const lkLocalPort = lkUrl.port || "7880";
-
+  // Tailscale Funnel always exposes on port 443 externally; we route gateway traffic through it.
+  // LiveKit stays on localhost — the gateway proxies LiveKit signalling over the same HTTPS tunnel.
   logger.info(
-    `[stimm-voice] Setting up Tailscale Funnel: gateway :${gwFunnelPort} → :${gatewayPort}, LiveKit :${lkFunnelPort} → :${lkLocalPort}`,
+    `[stimm-voice] Setting up Tailscale Funnel: https://${dnsName}/ → http://127.0.0.1:${gatewayPort}`,
   );
 
-  // Set up gateway funnel.
-  const gwOk = await setupFunnelRoute({
-    port: gwFunnelPort,
-    localUrl: `http://127.0.0.1:${gatewayPort}`,
-    logger,
-  });
+  const gwOk = await setupFunnelRoute(gatewayPort, logger);
 
   if (!gwOk) {
     logger.error("[stimm-voice] Failed to set up gateway tunnel.");
     return null;
   }
 
-  // Set up LiveKit funnel.
-  const lkOk = await setupFunnelRoute({
-    port: lkFunnelPort,
-    localUrl: `http://127.0.0.1:${lkLocalPort}`,
-    logger,
-  });
-
-  if (!lkOk) {
-    logger.warn("[stimm-voice] Failed to set up LiveKit tunnel. Voice may not work remotely.");
-    // Still return gateway URL — partial setup is better than nothing.
-  }
-
-  const gatewayPortSuffix = gwFunnelPort === 443 ? "" : `:${gwFunnelPort}`;
-  const livekitPortSuffix = lkFunnelPort === 443 ? "" : `:${lkFunnelPort}`;
-
   const info: TunnelInfo = {
-    gatewayUrl: `https://${dnsName}${gatewayPortSuffix}${config.web.path}`,
-    livekitUrl: `wss://${dnsName}${livekitPortSuffix}`,
+    gatewayUrl: `https://${dnsName}${config.web.path}`,
+    // LiveKit stays local; clients reach it through the gateway WebSocket proxy.
+    livekitUrl: config.livekit.url,
     dnsName,
   };
 
   logger.info(`[stimm-voice] 🌐 Public voice URL: ${info.gatewayUrl}`);
-  logger.info(`[stimm-voice] 🔗 Public LiveKit URL: ${info.livekitUrl}`);
 
   return info;
 }
@@ -388,8 +357,5 @@ export async function setupTunnel(
 /** Tear down Tailscale Funnel routes. */
 export async function cleanupTunnel(config: StimmVoiceConfig): Promise<void> {
   if (config.tunnel.provider === "none") return;
-  await Promise.all([
-    cleanupFunnelRoute(config.tunnel.gatewayFunnelPort),
-    cleanupFunnelRoute(config.tunnel.livekitFunnelPort),
-  ]);
+  await cleanupFunnelRoute();
 }
