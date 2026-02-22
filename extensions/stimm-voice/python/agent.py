@@ -106,7 +106,12 @@ class OpenClawSupervisor(ConversationSupervisor):
                             data,
                         )
                         return self.NO_ACTION
-                    return data.get("text") or self.NO_ACTION
+                    text = data.get("text") or self.NO_ACTION
+                    if text == self.NO_ACTION:
+                        logger.info("OpenClaw supervisor returned NO_ACTION")
+                    else:
+                        logger.info("OpenClaw supervisor returned context: %s", text)
+                    return text
         except Exception as exc:
             logger.error("OpenClaw supervisor HTTP call failed: %s", exc)
             return self.NO_ACTION

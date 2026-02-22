@@ -442,6 +442,9 @@ const stimmVoicePlugin = {
           api.logger.info(
             `[stimm-voice] Processing transcript from ${body.roomName} (${body.channel ?? "web"}): "${body.history.slice(0, 80)}"`,
           );
+          api.logger.info(
+            `[stimm-voice] Supervisor history (${body.roomName}, ${body.channel ?? "web"}):\n${body.history}`,
+          );
 
           const result = await generateStimmResponse({
             coreConfig,
@@ -452,6 +455,16 @@ const stimmVoicePlugin = {
 
           if (result.error) {
             api.logger.error(`[stimm-voice] Agent error: ${result.error}`);
+          }
+
+          if (result.text && result.text.trim().length > 0) {
+            api.logger.info(
+              `[stimm-voice] Supervisor response (${body.roomName}, ${body.channel ?? "web"}):\n${result.text}`,
+            );
+          } else {
+            api.logger.info(
+              `[stimm-voice] Supervisor response (${body.roomName}, ${body.channel ?? "web"}): [NO_ACTION or empty]`,
+            );
           }
 
           res.writeHead(200, { "Content-Type": "application/json" });
