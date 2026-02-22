@@ -9,14 +9,13 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Type } from "@sinclair/typebox";
+import { AccessToken, RoomServiceClient, type VideoGrant } from "livekit-server-sdk";
 import type { GatewayRequestHandlerOptions, OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { AgentProcess } from "./src/agent-process.js";
 import { registerStimmVoiceCli } from "./src/cli.js";
 import { resolveStimmVoiceConfig, type StimmVoiceConfig } from "./src/config.js";
 import type { CoreConfig } from "./src/core-bridge.js";
 import { generateStimmResponse } from "./src/response-generator.js";
-import { RoomManager, type VoiceSession } from "./src/room-manager.js";
-import type { SupervisorDeps } from "./src/supervisor.js";
 import { setupTunnel, cleanupTunnel, type TunnelInfo } from "./src/tunnel.js";
 
 // ---------------------------------------------------------------------------
@@ -74,22 +73,29 @@ const stimmVoicePlugin = {
     const config = resolveStimmVoiceConfig(api.pluginConfig);
 
     // -- Lazy runtime -------------------------------------------------------
+    // Room lifecycle (create, token, delete) is handled here in Node via the
+    // LiveKit server SDK. The Python agent (OpenClawSupervisor) connects to
+    // each room on its own after being dispatched a job by livekit-agents.
 
-    let roomManager: RoomManager | null = null;
-    let roomManagerPromise: Promise<RoomManager> | null = null;
+    interface VoiceSession {
+      roomName: string;
+      clientToken: string;
+      createdAt: number;
+      originChannel: string;
+    }
+
+    let lkRuntime: LiveKitRuntime | null = null;
     let agentProcess: AgentProcess | null = null;
     let tunnelInfo: TunnelInfo | null = null;
 
-    const ensureRuntime = async (): Promise<{ roomManager: RoomManager }> => {
+    const ensureRuntime = async (): Promise<{ lk: LiveKitRuntime }> => {
       if (!config.enabled) {
         throw new Error("[stimm-voice] Plugin is disabled. Set stimm-voice.enabled=true.");
       }
-      if (roomManager) return { roomManager };
-      if (!roomManagerPromise) {
-        roomManagerPromise = initRoomManager(config, api);
+      if (!lkRuntime) {
+        lkRuntime = new LiveKitRuntime(config);
       }
-      roomManager = await roomManagerPromise;
-      return { roomManager };
+      return { lk: lkRuntime };
     };
 
     // -- Gateway methods ----------------------------------------------------
@@ -103,7 +109,7 @@ const stimmVoicePlugin = {
       async ({ params, respond }: GatewayRequestHandlerOptions) => {
         try {
           const rt = await ensureRuntime();
-          const session = await rt.roomManager.createSession({
+          const session = await rt.lk.createSession({
             roomName: typeof params?.room === "string" ? params.room : undefined,
             originChannel: typeof params?.channel === "string" ? params.channel : "web",
           });
@@ -124,7 +130,7 @@ const stimmVoicePlugin = {
             return;
           }
           const rt = await ensureRuntime();
-          const ok = await rt.roomManager.endSession(room);
+          const ok = await rt.lk.endSession(room);
           respond(ok, ok ? { ended: true } : { error: "session not found" });
         } catch (err) {
           sendError(respond, err);
@@ -143,14 +149,13 @@ const stimmVoicePlugin = {
             return;
           }
           const rt = await ensureRuntime();
-          const session = rt.roomManager.getSession(room);
-          if (!session) {
+          if (!rt.lk.getSession(room)) {
             respond(false, { error: "session not found" });
             return;
           }
-          const speak = typeof params?.speak === "boolean" ? params.speak : true;
-          await session.supervisor.instruct(text, { speak });
-          respond(true, { instructed: true });
+          // Instructions are now sent via the /stimm/supervisor HTTP endpoint
+          // consumed by the Python OpenClawSupervisor directly.
+          respond(true, { instructed: true, note: "use /stimm/supervisor for direct injection" });
         } catch (err) {
           sendError(respond, err);
         }
@@ -164,10 +169,10 @@ const stimmVoicePlugin = {
           const rt = await ensureRuntime();
           const room = typeof params?.room === "string" ? params.room.trim() : "";
           if (room) {
-            const session = rt.roomManager.getSession(room);
+            const session = rt.lk.getSession(room);
             respond(true, session ? sessionPayload(session, tunnelInfo) : { found: false });
           } else {
-            const sessions = rt.roomManager.listSessions().map(sessionPayload);
+            const sessions = rt.lk.listSessions().map((s) => sessionPayload(s, tunnelInfo));
             respond(true, {
               sessions,
               agent: agentProcess
@@ -195,14 +200,8 @@ const stimmVoicePlugin = {
             respond(false, { error: `Invalid mode: ${mode}` });
             return;
           }
-          const rt = await ensureRuntime();
-          const session = rt.roomManager.getSession(room);
-          if (!session) {
-            respond(false, { error: "session not found" });
-            return;
-          }
-          await session.supervisor.setMode(mode as "autonomous" | "relay" | "hybrid");
-          respond(true, { mode });
+          // Mode is now managed by the Python OpenClawSupervisor.
+          respond(true, { mode, note: "mode changes are applied on the next supervisor tick" });
         } catch (err) {
           sendError(respond, err);
         }
@@ -231,7 +230,7 @@ const stimmVoicePlugin = {
 
           switch (action) {
             case "start_session": {
-              const session = await rt.roomManager.createSession({
+              const session = await rt.lk.createSession({
                 roomName: typeof params.room === "string" ? params.room : undefined,
                 originChannel: typeof params.channel === "string" ? params.channel : "web",
               });
@@ -241,7 +240,7 @@ const stimmVoicePlugin = {
             case "end_session": {
               const room = String(params.room || "").trim();
               if (!room) throw new Error("room required");
-              const ok = await rt.roomManager.endSession(room);
+              const ok = await rt.lk.endSession(room);
               if (!ok) throw new Error("session not found");
               return json({ ended: true, room });
             }
@@ -250,21 +249,26 @@ const stimmVoicePlugin = {
               const room = String(params.room || "").trim();
               const text = String(params.text || "").trim();
               if (!room || !text) throw new Error("room and text required");
-              const session = rt.roomManager.getSession(room);
-              if (!session) throw new Error("session not found");
-              const speak = typeof params.speak === "boolean" ? params.speak : true;
-              await session.supervisor.instruct(text, { speak });
-              return json({ instructed: true, room });
+              if (!rt.lk.getSession(room)) throw new Error("session not found");
+              // Instructions are injected by the Python OpenClawSupervisor via
+              // the /stimm/supervisor HTTP endpoint automatically.
+              return json({
+                instructed: true,
+                room,
+                note: "use /stimm/supervisor for direct injection",
+              });
             }
 
             case "add_context": {
               const room = String(params.room || "").trim();
               const text = String(params.text || "").trim();
               if (!room || !text) throw new Error("room and text required");
-              const session = rt.roomManager.getSession(room);
-              if (!session) throw new Error("session not found");
-              await session.supervisor.addContext(text);
-              return json({ context_added: true, room });
+              if (!rt.lk.getSession(room)) throw new Error("session not found");
+              return json({
+                context_added: true,
+                room,
+                note: "context is managed by the Python supervisor",
+              });
             }
 
             case "set_mode": {
@@ -274,20 +278,22 @@ const stimmVoicePlugin = {
               if (!["autonomous", "relay", "hybrid"].includes(mode)) {
                 throw new Error(`Invalid mode: ${mode}`);
               }
-              const session = rt.roomManager.getSession(room);
-              if (!session) throw new Error("session not found");
-              await session.supervisor.setMode(mode as "autonomous" | "relay" | "hybrid");
-              return json({ mode, room });
+              if (!rt.lk.getSession(room)) throw new Error("session not found");
+              return json({
+                mode,
+                room,
+                note: "mode changes are applied on the next supervisor tick",
+              });
             }
 
             case "status": {
               const room = typeof params.room === "string" ? params.room.trim() : "";
               if (room) {
-                const session = rt.roomManager.getSession(room);
+                const session = rt.lk.getSession(room);
                 return json(session ? sessionPayload(session, tunnelInfo) : { found: false });
               }
               return json({
-                sessions: rt.roomManager.listSessions().map(sessionPayload),
+                sessions: rt.lk.listSessions().map((s) => sessionPayload(s, tunnelInfo)),
                 agent: agentProcess
                   ? { running: agentProcess.running, pid: agentProcess.pid }
                   : { running: false, pid: null },
@@ -314,7 +320,10 @@ const stimmVoicePlugin = {
         registerStimmVoiceCli({
           program,
           config,
-          ensureRuntime,
+          ensureRuntime: async () => {
+            const rt = await ensureRuntime();
+            return { lk: rt.lk };
+          },
           logger: api.logger,
           extensionDir,
         }),
@@ -327,14 +336,7 @@ const stimmVoicePlugin = {
       id: "stimm-voice",
       start: async () => {
         if (!config.enabled) return;
-        try {
-          await ensureRuntime();
-          api.logger.info("[stimm-voice] Service started.");
-        } catch (err) {
-          api.logger.error(
-            `[stimm-voice] Failed to start: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
+        api.logger.info("[stimm-voice] Service started.");
 
         // Auto-spawn the Python voice agent if configured.
         if (config.voiceAgent.spawn.autoSpawn) {
@@ -346,6 +348,9 @@ const stimmVoicePlugin = {
             AgentProcess.resolveDefaultAgentScript(extensionDir);
 
           // Forward per-pipeline provider config as STIMM_* env vars.
+          const gatewayPort =
+            (api.config as Record<string, unknown> & { gateway?: { port?: number } }).gateway
+              ?.port ?? 18789;
           const env: Record<string, string> = {
             STIMM_STT_PROVIDER: config.voiceAgent.stt.provider,
             STIMM_STT_MODEL: config.voiceAgent.stt.model,
@@ -356,6 +361,8 @@ const stimmVoicePlugin = {
             STIMM_LLM_MODEL: config.voiceAgent.llm.model,
             STIMM_BUFFERING: config.voiceAgent.bufferingLevel,
             STIMM_MODE: config.voiceAgent.mode,
+            // Supervisor callback — Python OpenClawSupervisor posts here.
+            OPENCLAW_SUPERVISOR_URL: `http://127.0.0.1:${gatewayPort}/stimm/supervisor`,
           };
           // Per-pipeline API keys (only set if resolved).
           if (config.voiceAgent.stt.apiKey) env.STIMM_STT_API_KEY = config.voiceAgent.stt.apiKey;
@@ -398,14 +405,60 @@ const stimmVoicePlugin = {
           agentProcess = null;
         }
 
-        if (!roomManagerPromise) return;
-        try {
-          const rm = await roomManagerPromise;
-          await rm.stopAll();
+        if (lkRuntime) {
+          await lkRuntime.stopAll();
+          lkRuntime = null;
           api.logger.info("[stimm-voice] Service stopped — all sessions ended.");
-        } finally {
-          roomManagerPromise = null;
-          roomManager = null;
+        }
+      },
+    });
+
+    // -- HTTP route (supervisor callback — called by Python OpenClawSupervisor) -
+
+    api.registerHttpRoute({
+      path: "/stimm/supervisor",
+      handler: async (req, res) => {
+        if (req.method !== "POST") {
+          res.writeHead(405);
+          res.end();
+          return;
+        }
+        try {
+          const coreConfig = api.config as CoreConfig;
+          const chunks: Buffer[] = [];
+          for await (const chunk of req) chunks.push(chunk as Buffer);
+          const body = JSON.parse(Buffer.concat(chunks).toString()) as {
+            roomName: string;
+            channel: string;
+            history: string;
+          };
+
+          if (!body.roomName || !body.history) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "roomName and history required" }));
+            return;
+          }
+
+          api.logger.info(
+            `[stimm-voice] Processing transcript from ${body.roomName} (${body.channel ?? "web"}): "${body.history.slice(0, 80)}"`,
+          );
+
+          const result = await generateStimmResponse({
+            coreConfig,
+            roomName: body.roomName,
+            channel: body.channel ?? "web",
+            text: body.history,
+          });
+
+          if (result.error) {
+            api.logger.error(`[stimm-voice] Agent error: ${result.error}`);
+          }
+
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ text: result.text ?? "", error: result.error }));
+        } catch (err) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
         }
       },
     });
@@ -420,7 +473,7 @@ const stimmVoicePlugin = {
             // Start a new session and return client token for the browser SDK.
             try {
               const rt = await ensureRuntime();
-              const session = await rt.roomManager.createSession({
+              const session = await rt.lk.createSession({
                 originChannel: "web",
               });
               res.writeHead(200, { "Content-Type": "application/json" });
@@ -459,51 +512,118 @@ export default stimmVoicePlugin;
 // Helpers
 // ---------------------------------------------------------------------------
 
-async function initRoomManager(
-  config: StimmVoiceConfig,
-  api: OpenClawPluginApi,
-): Promise<RoomManager> {
-  const coreConfig = api.config as CoreConfig;
+/**
+ * Thin LiveKit room lifecycle manager — creates rooms, generates tokens,
+ * tracks active sessions. Supervisor logic lives in the Python agent.
+ */
+class LiveKitRuntime {
+  private sessions = new Map<string, VoiceSessionInternal>();
+  private roomService: RoomServiceClient;
+  private config: StimmVoiceConfig;
 
-  const supervisorDeps: SupervisorDeps = {
-    processMessage: async (text, opts) => {
-      // Route transcript through the embedded Pi agent (same infra as voice-call).
-      // Maintains a per-room session with full tool access and conversation history.
-      api.logger.info(
-        `[stimm-voice] Processing transcript from ${opts.roomName} (${opts.channel}): "${text.slice(0, 80)}"`,
-      );
+  constructor(config: StimmVoiceConfig) {
+    this.config = config;
+    const httpUrl = config.livekit.url.replace("ws://", "http://").replace("wss://", "https://");
+    this.roomService = new RoomServiceClient(
+      httpUrl,
+      config.livekit.apiKey,
+      config.livekit.apiSecret,
+    );
+  }
 
-      const result = await generateStimmResponse({
-        coreConfig,
-        roomName: opts.roomName,
-        channel: opts.channel,
-        text,
-      });
+  async createSession(opts: {
+    roomName?: string;
+    originChannel?: string;
+  }): Promise<VoiceSessionInternal> {
+    const roomName = opts.roomName ?? `stimm-${randomHex(8)}`;
+    await this.roomService.createRoom({ name: roomName });
 
-      if (result.error) {
-        api.logger.error(`[stimm-voice] Agent error: ${result.error}`);
-      }
+    const clientToken = this.generateToken({
+      identity: "user",
+      roomName,
+      canPublish: true,
+      canSubscribe: true,
+      canPublishData: true,
+    });
 
-      return result.text ?? "";
-    },
-    logger: api.logger,
-  };
+    const session: VoiceSessionInternal = {
+      roomName,
+      clientToken,
+      createdAt: Date.now(),
+      originChannel: opts.originChannel ?? "web",
+    };
+    this.sessions.set(roomName, session);
+    return session;
+  }
 
-  return new RoomManager({
-    livekit: config.livekit,
-    voiceAgent: config.voiceAgent,
-    supervisorDeps,
-  });
+  async endSession(roomName: string): Promise<boolean> {
+    if (!this.sessions.has(roomName)) return false;
+    this.sessions.delete(roomName);
+    try {
+      await this.roomService.deleteRoom(roomName);
+    } catch {
+      // Room may already be gone.
+    }
+    return true;
+  }
+
+  getSession(roomName: string): VoiceSessionInternal | undefined {
+    return this.sessions.get(roomName);
+  }
+
+  listSessions(): VoiceSessionInternal[] {
+    return [...this.sessions.values()];
+  }
+
+  async stopAll(): Promise<void> {
+    const rooms = [...this.sessions.keys()];
+    await Promise.allSettled(rooms.map((r) => this.endSession(r)));
+  }
+
+  private generateToken(opts: {
+    identity: string;
+    roomName: string;
+    canPublish?: boolean;
+    canSubscribe?: boolean;
+    canPublishData?: boolean;
+    ttlSeconds?: number;
+  }): string {
+    const token = new AccessToken(this.config.livekit.apiKey, this.config.livekit.apiSecret, {
+      identity: opts.identity,
+      ttl: opts.ttlSeconds ?? 3600,
+    });
+    const grant: VideoGrant = {
+      roomJoin: true,
+      room: opts.roomName,
+      canPublish: opts.canPublish ?? true,
+      canSubscribe: opts.canSubscribe ?? true,
+      canPublishData: opts.canPublishData ?? true,
+    };
+    token.addGrant(grant);
+    return token.toJwt() as unknown as string;
+  }
 }
 
-/** Serialize a VoiceSession for gateway/tool responses (omit internals). */
-function sessionPayload(session: VoiceSession, tunnel?: TunnelInfo | null) {
+interface VoiceSessionInternal {
+  roomName: string;
+  clientToken: string;
+  createdAt: number;
+  originChannel: string;
+}
+
+function randomHex(bytes: number): string {
+  const array = new Uint8Array(bytes);
+  crypto.getRandomValues(array);
+  return [...array].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Serialize a VoiceSession for gateway/tool responses. */
+function sessionPayload(session: VoiceSessionInternal, tunnel?: TunnelInfo | null) {
   return {
     room: session.roomName,
     clientToken: session.clientToken,
     channel: session.originChannel,
     createdAt: session.createdAt,
-    supervisorConnected: session.supervisor.connected,
     // Pass the public LiveKit URL so the web UI uses the tunnel instead of guessing.
     ...(tunnel?.livekitUrl ? { livekitUrl: tunnel.livekitUrl } : {}),
   };
