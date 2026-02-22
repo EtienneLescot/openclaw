@@ -139,22 +139,30 @@ def make_agent() -> VoiceAgent:
         buffering_level=os.environ.get("STIMM_BUFFERING", "MEDIUM"),  # type: ignore[arg-type]
         mode=os.environ.get("STIMM_MODE", "hybrid"),  # type: ignore[arg-type]
         instructions=(
-            "You are a voice assistant working with a supervisor AI. "
-            "You handle the live conversation while the supervisor researches answers.\n\n"
-            "Rules:\n"
+            "You are a voice assistant. You work alongside a supervisor AI "
+            "called Stimmy who has access to tools, memory, and real knowledge. "
+            "You handle the live conversation; Stimmy thinks in the background.\n\n"
+            "IDENTITY & TRANSPARENCY:\n"
+            "- You are the voice interface. Stimmy is your supervisor.\n"
+            "- Be HONEST about this setup. Never pretend to know things you don't.\n"
+            "- When the user asks a factual/technical question, say things like: "
+            "'Je demande à Stimmy', 'Je me renseigne auprès de mon superviseur', "
+            "'Laisse-moi vérifier avec Stimmy'.\n\n"
+            "WHEN SUPERVISOR INSTRUCTIONS ARRIVE:\n"
+            "- Acknowledge the source naturally: 'Stimmy me dit que...', "
+            "'Ah, j'ai le retour de Stimmy :', 'Alors d'après Stimmy...'.\n"
+            "- Relay the information FAITHFULLY. Don't paraphrase loosely.\n"
+            "- Don't mix your own guesses with Stimmy's answer.\n\n"
+            "WHAT YOU CAN DO ON YOUR OWN:\n"
+            "- Greetings, small talk, acknowledgements, follow-up questions.\n"
+            "- Simple tasks: 'raconte une histoire', 'dis un mot drôle', etc.\n"
+            "- Confirm understanding, ask for clarification.\n\n"
+            "RULES:\n"
             "1. Always respond in the SAME LANGUAGE the user is speaking.\n"
-            "2. Keep your responses short and natural (1-2 sentences).\n"
-            "3. NEVER invent facts, names, technical details, or specific answers. "
-            "If you don't know, acknowledge and say you're checking.\n"
-            "4. When supervisor instructions appear in your context, "
-            "relay the information FAITHFULLY to the user. This is the real answer — "
-            "present it naturally as your own knowledge.\n"
-            "5. You CAN have natural conversation: greet, acknowledge, ask follow-ups, "
-            "confirm understanding. The user may ask multiple things in a row — "
-            "that's fine, acknowledge each one.\n"
-            "6. If the user asks something you can clearly answer (greetings, "
-            "simple chat, clarification questions), answer directly. "
-            "Only defer to the supervisor for factual/technical questions."
+            "2. Keep responses short and natural (1-2 sentences).\n"
+            "3. NEVER invent facts, names, or technical details.\n"
+            "4. If the user asks multiple things at once, handle what you can "
+            "and explicitly say you're asking Stimmy for the rest."
         ),
     )
 
@@ -183,10 +191,11 @@ async def entrypoint(ctx: JobContext) -> None:
             agent.publish_transcript(ev.transcript, partial=not ev.is_final)
         )
 
-    # Custom instruction handler: when the big LLM has a real answer,
-    # interrupt whatever the small LLM is saying and speak it immediately.
-    # This is safe because the buffer architecture ensures only one
-    # instruction per batch — no cascading interrupts.
+    # Custom instruction handler: when Stimmy (big LLM) has an answer,
+    # interrupt the small LLM's current speech and trigger a NEW turn
+    # via generate_reply(instructions=...).  This way the small LLM
+    # reformulates naturally: "Stimmy me dit que... revenons à notre histoire"
+    # instead of raw TTS of the big LLM's text.
     #
     # Override Stimm's internal _handle_instruction to a no-op to prevent
     # double-speak (internal handler also speaks on interrupt priority).
@@ -198,10 +207,32 @@ async def entrypoint(ctx: JobContext) -> None:
     agent._handle_instruction = _noop_instruction  # type: ignore[assignment]
 
     async def _on_instruction(msg: InstructionMessage) -> None:
-        if msg.speak and msg.text:
-            if msg.priority == "interrupt":
-                await session.interrupt()
-            await session.say(msg.text, allow_interruptions=True)
+        if not msg.text:
+            return
+        import logging
+        logger = logging.getLogger("openclaw.voice")
+        logger.info(">>> Instruction received: %s", msg.text[:100])
+        try:
+            # Interrupt current small LLM speech.
+            await session.interrupt()
+            logger.info(">>> Interrupted, calling generate_reply")
+            # Trigger a new small LLM turn with Stimmy's answer as instructions.
+            # The small LLM will naturally introduce it ("Stimmy me dit que...")
+            # and resume whatever it was doing before.
+            session.generate_reply(
+                instructions=(
+                    f"IMPORTANT: Your supervisor Stimmy just sent this answer. "
+                    f"Relay it to the user naturally. Introduce it "
+                    f"('Stimmy me dit que...', 'J'ai le retour de Stimmy :') "
+                    f"then if you were doing something before (telling a story, etc.) "
+                    f"resume it briefly ('Bon, où j'en étais...'):\n\n"
+                    f"{msg.text}"
+                ),
+                allow_interruptions=True,
+            )
+            logger.info(">>> generate_reply called successfully")
+        except Exception as exc:
+            logger.error(">>> Instruction handler error: %s", exc, exc_info=True)
 
     agent.protocol.on_instruction(_on_instruction)
 
@@ -210,6 +241,39 @@ async def entrypoint(ctx: JobContext) -> None:
     # Bind the Stimm protocol after session.start() so the room is fully
     # initialised before we open the data channel.
     agent.protocol.bind(ctx.room)
+
+    # ── DEBUG: raw room-level data listener ──────────────────────────
+    import logging as _logging
+    _dbg = _logging.getLogger("openclaw.voice")
+
+    def _raw_data(data_packet):
+        import sys
+        print(f">>> RAW data_received: topic={getattr(data_packet, 'topic', '?')} "
+              f"len={len(getattr(data_packet, 'data', b''))} "
+              f"from={getattr(getattr(data_packet, 'participant', None), 'identity', '?')}",
+              file=sys.stderr, flush=True)
+        _dbg.warning(">>> RAW data_received: topic=%s len=%s from=%s",
+                     getattr(data_packet, "topic", "?"),
+                     len(getattr(data_packet, "data", b"")),
+                     getattr(getattr(data_packet, "participant", None), "identity", "?"))
+
+    ctx.room.on("data_received", _raw_data)
+
+    # Also listen for participant_connected to know when supervisor joins
+    def _on_participant_connected(participant):
+        import sys
+        print(f">>> Participant connected: {participant.identity}", file=sys.stderr, flush=True)
+    ctx.room.on("participant_connected", _on_participant_connected)
+
+    import sys
+    print(f">>> Diagnostics installed — room={ctx.room.name}, "
+          f"participants={[p.identity for p in ctx.room.remote_participants.values()]}",
+          file=sys.stderr, flush=True)
+    _dbg.warning(">>> Diagnostics installed — room=%s, participants=%s",
+                 ctx.room.name,
+                 [p.identity for p in ctx.room.remote_participants.values()])
+    # ── END DEBUG ────────────────────────────────────────────────────
+
     # Keep the entrypoint alive until the room disconnects.
     disconnect = asyncio.Event()
 
