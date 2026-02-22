@@ -529,159 +529,277 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
     }
   }
 
-  // -- LiveKit (optional) --------------------------------------------------
+  // -- LiveKit ------------------------------------------------------------
+  //
+  // Two modes:
+  //   "cloud"  — LiveKit Cloud (cloud.livekit.io) — free tier available.
+  //              Your gateway creates rooms + tokens, your Python agent connects
+  //              to the cloud server. The phone browser connects to LiveKit
+  //              Cloud directly for WebRTC — no tunnel needed.
+  //   "local"  — LiveKit runs on this machine (localhost:7880).
+  //              Phone can only reach it on the same LAN, or if the phone also
+  //              has Tailscale installed (Tailscale Serve, not Funnel).
+  //              All your agent logic, routing, STT/TTS/LLM stay in stimm-voice.
+
+  type LiveKitMode = "cloud" | "local";
 
   let livekitUrl = existing.livekit?.url ?? "";
   let livekitApiKey = existing.livekit?.apiKey ?? "";
   let livekitApiSecret = existing.livekit?.apiSecret ?? "";
 
+  // Detect existing mode from saved URL.
+  const existingLivekitMode: LiveKitMode =
+    livekitUrl && !livekitUrl.startsWith("ws://localhost") ? "cloud" : "local";
+
   const hasLivekitConfig = !!existing.livekit?.url;
 
   if (hasLivekitConfig) {
-    await c.log.info(`  Current LiveKit: ${existing.livekit!.url}`);
+    const modeLabel = existingLivekitMode === "cloud" ? "LiveKit Cloud" : "LiveKit local";
+    await c.log.info(`  Current LiveKit: ${modeLabel} (${existing.livekit!.url})`);
   }
 
-  const configureLivekit = await c.confirm({
-    message: hasLivekitConfig
-      ? "Reconfigure LiveKit connection?"
-      : "Configure LiveKit connection? (skip for local dev defaults)",
-    initialValue: false,
-  });
+  const reconfigureLivekit =
+    !hasLivekitConfig ||
+    (await (async () => {
+      const v = await c.confirm({ message: "Reconfigure LiveKit?", initialValue: false });
+      if (isCancel(v)) {
+        c.outro("Setup cancelled.");
+        return null;
+      }
+      return v;
+    })());
 
-  if (isCancel(configureLivekit)) {
-    c.outro("Setup cancelled.");
-    return;
-  }
+  if (reconfigureLivekit === null) return;
 
-  if (configureLivekit) {
-    const url = await c.text({
-      message: "LiveKit server URL",
-      initialValue: existing.livekit?.url ?? "ws://localhost:7880",
-      placeholder: "wss://your-livekit.livekit.cloud",
+  let livekitMode: LiveKitMode = existingLivekitMode;
+
+  if (reconfigureLivekit) {
+    const modeResult = await c.select<
+      { value: LiveKitMode; label: string; hint: string }[],
+      LiveKitMode
+    >({
+      message: "LiveKit deployment",
+      options: [
+        {
+          value: "cloud",
+          label: "LiveKit Cloud  (recommended)",
+          hint: "cloud.livekit.io — free tier, phone connects directly, no tunnel needed for WebRTC",
+        },
+        {
+          value: "local",
+          label: "LiveKit local",
+          hint: "localhost:7880 — LAN only, or Tailscale on phone required for remote WebRTC",
+        },
+      ],
+      initialValue: existingLivekitMode,
     });
-    if (isCancel(url)) {
+
+    if (isCancel(modeResult)) {
       c.outro("Setup cancelled.");
       return;
     }
-    livekitUrl = url as string;
+    livekitMode = modeResult;
 
-    const key = await c.text({
-      message: "LiveKit API Key",
-      placeholder: "APIxxxxx",
-    });
-    if (isCancel(key)) {
-      c.outro("Setup cancelled.");
-      return;
-    }
-    livekitApiKey = key as string;
+    if (livekitMode === "cloud") {
+      await c.log.info(
+        [
+          "",
+          "  Create a free project at https://cloud.livekit.io if you haven't yet.",
+          "  Your gateway creates rooms and tokens — LiveKit Cloud is just the media relay.",
+          "  Copy the URL, API Key, and API Secret from your project's settings.",
+          "",
+        ].join("\n"),
+      );
 
-    const secret = await c.text({
-      message: "LiveKit API Secret",
-      placeholder: "secret",
-    });
-    if (isCancel(secret)) {
-      c.outro("Setup cancelled.");
-      return;
+      const url = await c.text({
+        message: "LiveKit Cloud URL",
+        initialValue:
+          livekitUrl && !livekitUrl.startsWith("ws://localhost")
+            ? livekitUrl
+            : "wss://your-project.livekit.cloud",
+        placeholder: "wss://your-project.livekit.cloud",
+      });
+      if (isCancel(url)) {
+        c.outro("Setup cancelled.");
+        return;
+      }
+      livekitUrl = url as string;
+
+      const key = await c.text({
+        message: "LiveKit API Key",
+        initialValue: livekitApiKey,
+        placeholder: "APIxxxxx",
+      });
+      if (isCancel(key)) {
+        c.outro("Setup cancelled.");
+        return;
+      }
+      livekitApiKey = key as string;
+
+      const secret = await c.text({
+        message: "LiveKit API Secret",
+        initialValue: livekitApiSecret,
+        placeholder: "secret...",
+      });
+      if (isCancel(secret)) {
+        c.outro("Setup cancelled.");
+        return;
+      }
+      livekitApiSecret = secret as string;
+    } else {
+      // Local mode — use localhost defaults.
+      livekitUrl = "ws://localhost:7880";
+      livekitApiKey = livekitApiKey || "devkey";
+      livekitApiSecret = livekitApiSecret || "devsecret";
+      await c.log.info("  Using local LiveKit: ws://localhost:7880");
     }
-    livekitApiSecret = secret as string;
   }
 
   // -- Tunnel (remote access) ----------------------------------------------
+  //
+  // Tailscale Funnel exposes the gateway on port 443 (HTTPS).
+  // - LiveKit Cloud: Funnel is optional (only needed to serve /voice page remotely).
+  // - LiveKit local: Funnel is strongly recommended (clients need gateway reachable).
 
   const { getTailscaleStatus, installTailscale, loginTailscale } = await import("./tunnel.js");
   let tsStatus = await getTailscaleStatus();
 
-  let tunnelProvider: TunnelProvider = "none";
+  let tunnelProvider: TunnelProvider = (existing.tunnel?.provider as TunnelProvider) ?? "none";
 
-  // Step 1: Install Tailscale if missing.
-  if (!tsStatus.installed) {
-    const wantInstall = await c.confirm({
-      message: "Tailscale is not installed. Install it now for remote access? (requires sudo)",
-      initialValue: true,
+  const alreadyHasTunnel = tunnelProvider === "tailscale-funnel";
+
+  if (alreadyHasTunnel && tsStatus.installed && tsStatus.loggedIn) {
+    await c.log.success(`  Tailscale Funnel already enabled (${tsStatus.dnsName ?? "connected"})`);
+    const reconfigureTunnel = await c.confirm({
+      message: "Reconfigure Tailscale Funnel?",
+      initialValue: false,
+    });
+    if (isCancel(reconfigureTunnel)) {
+      c.outro("Setup cancelled.");
+      return;
+    }
+    if (!reconfigureTunnel) {
+      // Keep existing tunnel config — skip the rest of this section.
+      // Jump to Save.
+    } else {
+      // Reset and re-run tunnel setup below.
+      tunnelProvider = "none";
+    }
+  }
+
+  if (!alreadyHasTunnel || tunnelProvider === "none") {
+    const tunnelHint =
+      livekitMode === "local"
+        ? "Exposes the /voice page publicly — but WebRTC still requires Tailscale on the phone"
+        : "Exposes the /voice page publicly — WebRTC connects to LiveKit Cloud directly";
+
+    const wantTunnel = await c.confirm({
+      message: `Set up Tailscale Funnel for remote access? (${tunnelHint})`,
+      initialValue: livekitMode === "local",
     });
 
-    if (isCancel(wantInstall)) {
+    if (isCancel(wantTunnel)) {
       c.outro("Setup cancelled.");
       return;
     }
 
-    if (wantInstall) {
-      await c.log.step("Installing Tailscale (you may be prompted for your sudo password)...");
+    if (wantTunnel) {
+      // Step 1: Install Tailscale if missing.
+      if (!tsStatus.installed) {
+        const wantInstall = await c.confirm({
+          message: "Tailscale is not installed. Install it now? (requires sudo)",
+          initialValue: true,
+        });
 
-      const result = await installTailscale();
+        if (isCancel(wantInstall)) {
+          c.outro("Setup cancelled.");
+          return;
+        }
 
-      if (result.success) {
-        await c.log.success("Tailscale installed ✓");
-        // Re-check status after install.
-        tsStatus = await getTailscaleStatus();
-      } else {
-        await c.log.warn("Tailscale installation failed: " + result.message);
+        if (wantInstall) {
+          await c.log.step("Installing Tailscale (you may be prompted for your sudo password)...");
+          const result = await installTailscale();
+          if (result.success) {
+            await c.log.success("Tailscale installed ✓");
+            tsStatus = await getTailscaleStatus();
+          } else {
+            await c.log.warn("Tailscale installation failed: " + result.message);
+          }
+        } else {
+          await c.log.info(
+            "Skipped — voice will be LAN-only. Install later: https://tailscale.com/download",
+          );
+        }
+      }
+
+      // Step 2: Login if installed but not logged in.
+      if (tsStatus.installed && !tsStatus.loggedIn) {
+        const wantLogin = await c.confirm({
+          message: "Tailscale is installed but not logged in. Log in now? (requires sudo)",
+          initialValue: true,
+        });
+
+        if (isCancel(wantLogin)) {
+          c.outro("Setup cancelled.");
+          return;
+        }
+
+        if (wantLogin) {
+          await c.log.step(
+            "Running `sudo tailscale up` — follow the instructions below to authenticate.",
+          );
+          const loginResult = await loginTailscale();
+          if (loginResult.success) {
+            await c.log.success("Tailscale login successful ✓");
+            tsStatus = await getTailscaleStatus();
+          } else {
+            await c.log.warn(
+              "Tailscale login did not complete. Retry later with: sudo tailscale up",
+            );
+          }
+        }
+      }
+
+      // Step 3: Enable Funnel.
+      if (tsStatus.installed && tsStatus.loggedIn) {
+        const funnelEnableUrl = `https://login.tailscale.com/admin/dns`;
+        await c.log.info(
+          [
+            "",
+            "  To use Tailscale Funnel, you need to enable it on your tailnet first.",
+            "  Open this URL in your browser and enable 'Funnel' under 'HTTPS':",
+            "",
+            `    ${funnelEnableUrl}`,
+            "",
+          ].join("\n"),
+        );
+
+        const funnelEnabled = await c.confirm({
+          message: "Have you enabled Funnel on your Tailscale account?",
+          initialValue: false,
+        });
+
+        if (isCancel(funnelEnabled)) {
+          c.outro("Setup cancelled.");
+          return;
+        }
+
+        if (funnelEnabled) {
+          tunnelProvider = "tailscale-funnel";
+          await c.log.success(
+            `  Funnel will be activated on gateway start.\n` +
+              `  Public URL: https://${tsStatus.dnsName ?? "<your-tailscale-node>"}/voice`,
+          );
+        } else {
+          await c.log.warn(
+            "Funnel not enabled — voice will be LAN-only until you enable it.\n" +
+              "  Run `openclaw voice:setup` again after enabling Funnel on your account.",
+          );
+        }
       }
     } else {
-      await c.log.info(
-        "Skipped — voice will be LAN-only. You can install later: https://tailscale.com/download",
-      );
-    }
-  }
-
-  // Step 2: Login if installed but not logged in.
-  if (tsStatus.installed && !tsStatus.loggedIn) {
-    const wantLogin = await c.confirm({
-      message: "Tailscale is installed but not logged in. Log in now? (requires sudo)",
-      initialValue: true,
-    });
-
-    if (isCancel(wantLogin)) {
-      c.outro("Setup cancelled.");
-      return;
-    }
-
-    if (wantLogin) {
-      await c.log.step(
-        "Running `sudo tailscale up` — follow the instructions below to authenticate.",
-      );
-
-      const loginResult = await loginTailscale();
-
-      if (loginResult.success) {
-        await c.log.success("Tailscale login successful ✓");
-        tsStatus = await getTailscaleStatus();
-      } else {
-        await c.log.warn(
-          "Tailscale login did not complete.\n" + "You can retry later with: sudo tailscale up",
-        );
-      }
-    }
-  }
-
-  // Step 3: Offer Funnel if logged in.
-  if (tsStatus.installed && tsStatus.loggedIn) {
-    await c.log.success(`Tailscale connected — logged in as ${tsStatus.dnsName}`);
-
-    const enableTunnel = await c.confirm({
-      message:
-        "Enable Tailscale Funnel? This makes /voice accessible from the internet (phone, etc.)",
-      initialValue: true,
-    });
-
-    if (isCancel(enableTunnel)) {
-      c.outro("Setup cancelled.");
-      return;
-    }
-
-    if (enableTunnel) {
-      tunnelProvider = "tailscale-funnel";
-      await c.log.info(
-        [
-          "",
-          "  Tailscale Funnel will expose two ports:",
-          "    443  → OpenClaw gateway (serves /voice web UI)",
-          "    8443 → LiveKit (WebRTC signaling)",
-          "",
-          `  Public URL: https://${tsStatus.dnsName}/voice`,
-          "",
-        ].join("\n"),
-      );
+      tunnelProvider = "none";
+      await c.log.info("  Tunnel disabled — voice accessible on LAN only.");
     }
   }
 
@@ -728,13 +846,14 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
   await c.log.info(
     [
       "",
-      "  STT:  " + STT_META[sttProvider].label + " / " + sttModel,
-      "  TTS:  " + TTS_META[ttsProvider].label + " / " + ttsModel + " (voice: " + ttsVoice + ")",
-      "  LLM:  " + LLM_META[llmProvider].label + " / " + llmModel,
-      livekitUrl ? "  LiveKit: " + livekitUrl : "  LiveKit: localhost:7880 (dev default)",
+      "  STT:     " + STT_META[sttProvider].label + " / " + sttModel,
+      "  TTS:     " + TTS_META[ttsProvider].label + " / " + ttsModel + " (voice: " + ttsVoice + ")",
+      "  LLM:     " + LLM_META[llmProvider].label + " / " + llmModel,
+      "  LiveKit: " +
+        (livekitMode === "cloud" ? `Cloud (${livekitUrl})` : "Local (ws://localhost:7880)"),
       tunnelProvider === "tailscale-funnel"
-        ? `  Tunnel: Tailscale Funnel (${tsStatus.dnsName})`
-        : "  Tunnel: none (LAN-only)",
+        ? `  Tunnel:  Tailscale Funnel → https://${tsStatus.dnsName}/voice`
+        : "  Tunnel:  none (LAN-only)",
       "",
     ].join("\n"),
   );
