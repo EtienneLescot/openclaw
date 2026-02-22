@@ -18,6 +18,7 @@ import {
   type SttProvider,
   type TtsProvider,
   type LlmProvider,
+  type TunnelProvider,
 } from "./config.js";
 
 // ---------------------------------------------------------------------------
@@ -424,6 +425,119 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
     livekitApiSecret = secret as string;
   }
 
+  // -- Tunnel (remote access) ----------------------------------------------
+
+  const { getTailscaleStatus, installTailscale, loginTailscale } = await import("./tunnel.js");
+  let tsStatus = await getTailscaleStatus();
+
+  let tunnelProvider: TunnelProvider = "none";
+
+  // Step 1: Install Tailscale if missing.
+  if (!tsStatus.installed) {
+    const wantInstall = await c.confirm({
+      message: "Tailscale is not installed. Install it now for remote access? (requires sudo)",
+      initialValue: true,
+    });
+
+    if (isCancel(wantInstall)) {
+      c.outro("Setup cancelled.");
+      return;
+    }
+
+    if (wantInstall) {
+      const installSpinner = c.spinner();
+      installSpinner.start("Installing Tailscale...");
+
+      const result = await installTailscale((line) => {
+        installSpinner.message(line.slice(0, 80));
+      });
+
+      if (result.success) {
+        installSpinner.stop("Tailscale installed ✓");
+        // Re-check status after install.
+        tsStatus = await getTailscaleStatus();
+      } else {
+        installSpinner.stop("Tailscale installation failed.");
+        await c.log.warn(result.message);
+      }
+    } else {
+      await c.log.info(
+        "Skipped — voice will be LAN-only. You can install later: https://tailscale.com/download",
+      );
+    }
+  }
+
+  // Step 2: Login if installed but not logged in.
+  if (tsStatus.installed && !tsStatus.loggedIn) {
+    const wantLogin = await c.confirm({
+      message: "Tailscale is installed but not logged in. Log in now? (requires sudo)",
+      initialValue: true,
+    });
+
+    if (isCancel(wantLogin)) {
+      c.outro("Setup cancelled.");
+      return;
+    }
+
+    if (wantLogin) {
+      await c.log.info(
+        "Starting `tailscale up` — a browser link will appear below.\n" +
+          "Open it to authenticate, then come back here.",
+      );
+
+      const loginResult = await loginTailscale((line) => {
+        // Show auth URL prominently when detected.
+        if (line.includes("https://login.tailscale.com")) {
+          // Will be printed by the log below, but also let it flow.
+        }
+      });
+
+      if (loginResult.authUrl) {
+        await c.log.info(`\n  🔗 Open this URL to log in:\n  ${loginResult.authUrl}\n`);
+      }
+
+      if (loginResult.success) {
+        await c.log.success("Tailscale login successful ✓");
+        tsStatus = await getTailscaleStatus();
+      } else {
+        await c.log.warn(
+          "Tailscale login did not complete.\n" + "You can retry later with: sudo tailscale up",
+        );
+      }
+    }
+  }
+
+  // Step 3: Offer Funnel if logged in.
+  if (tsStatus.installed && tsStatus.loggedIn) {
+    await c.log.success(`Tailscale connected — logged in as ${tsStatus.dnsName}`);
+
+    const enableTunnel = await c.confirm({
+      message:
+        "Enable Tailscale Funnel? This makes /voice accessible from the internet (phone, etc.)",
+      initialValue: true,
+    });
+
+    if (isCancel(enableTunnel)) {
+      c.outro("Setup cancelled.");
+      return;
+    }
+
+    if (enableTunnel) {
+      tunnelProvider = "tailscale-funnel";
+      await c.log.info(
+        [
+          "",
+          "  Tailscale Funnel will expose two ports:",
+          "    443  → OpenClaw gateway (serves /voice web UI)",
+          "    8443 → LiveKit (WebRTC signaling)",
+          "",
+          `  Public URL: https://${tsStatus.dnsName}/voice`,
+          "",
+        ].join("\n"),
+      );
+    }
+  }
+
   // -- Save ---------------------------------------------------------------
 
   const s = c.spinner();
@@ -448,6 +562,9 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
     if (livekitApiKey) entries["livekit.apiKey"] = livekitApiKey;
     if (livekitApiSecret) entries["livekit.apiSecret"] = livekitApiSecret;
 
+    // Tunnel config.
+    entries["tunnel.provider"] = tunnelProvider;
+
     saveConfig(entries);
 
     s.stop("Configuration saved.");
@@ -468,12 +585,20 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
       "  TTS:  " + TTS_META[ttsProvider].label + " / " + ttsModel + " (voice: " + ttsVoice + ")",
       "  LLM:  " + LLM_META[llmProvider].label + " / " + llmModel,
       livekitUrl ? "  LiveKit: " + livekitUrl : "  LiveKit: localhost:7880 (dev default)",
+      tunnelProvider === "tailscale-funnel"
+        ? `  Tunnel: Tailscale Funnel (${tsStatus.dnsName})`
+        : "  Tunnel: none (LAN-only)",
       "",
     ].join("\n"),
   );
 
+  const outroUrl =
+    tunnelProvider === "tailscale-funnel" && tsStatus.dnsName
+      ? `https://${tsStatus.dnsName}/voice`
+      : "http://localhost:<port>/voice";
+
   c.outro(
     "Setup complete! Start a voice session with: openclaw voice:start\n" +
-      "Or open the web UI at: http://localhost:<port>/voice",
+      `Or open the web UI at: ${outroUrl}`,
   );
 }
