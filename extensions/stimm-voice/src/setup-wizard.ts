@@ -55,6 +55,49 @@ function saveConfig(entries: Record<string, unknown>): void {
 }
 
 // ---------------------------------------------------------------------------
+// Config reader — load existing stimm-voice config from openclaw.json.
+// ---------------------------------------------------------------------------
+
+interface ExistingConfig {
+  stt?: { provider?: string; model?: string; language?: string; apiKey?: string };
+  tts?: { provider?: string; model?: string; voice?: string; apiKey?: string };
+  llm?: { provider?: string; model?: string; apiKey?: string };
+  livekit?: { url?: string; apiKey?: string; apiSecret?: string };
+  tunnel?: { provider?: string };
+}
+
+function deepGet(obj: Record<string, unknown>, path: string[]): unknown {
+  let current: unknown = obj;
+  for (const key of path) {
+    if (current === null || current === undefined || typeof current !== "object") return undefined;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return current;
+}
+
+function loadExistingConfig(): ExistingConfig {
+  const configPath = join(homedir(), ".openclaw", "openclaw.json");
+  if (!existsSync(configPath)) return {};
+  try {
+    const raw = JSON.parse(readFileSync(configPath, "utf-8"));
+    const base = deepGet(raw, ["plugins", "entries", "stimm-voice", "config"]) as
+      | Record<string, unknown>
+      | undefined;
+    if (!base) return {};
+    const va = base.voiceAgent as Record<string, unknown> | undefined;
+    return {
+      stt: va?.stt as ExistingConfig["stt"],
+      tts: va?.tts as ExistingConfig["tts"],
+      llm: va?.llm as ExistingConfig["llm"],
+      livekit: base.livekit as ExistingConfig["livekit"],
+      tunnel: base.tunnel as ExistingConfig["tunnel"],
+    };
+  } catch {
+    return {};
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Provider metadata (labels, default models, descriptions).
 // ---------------------------------------------------------------------------
 
@@ -141,245 +184,367 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
     await c.log.success("Python virtual environment found.");
   }
 
+  // Load existing config to allow skipping sections.
+  const existing = loadExistingConfig();
+
   // -- STT ----------------------------------------------------------------
 
-  const sttProvider = (await c.select({
-    message: "Speech-to-Text provider",
-    options: STT_PROVIDERS.map((id) => ({
-      value: id,
-      label: `${STT_META[id].label}`,
-      hint: providerEnvVar(id) ?? "",
-    })),
-    initialValue: "deepgram" as SttProvider,
-  })) as SttProvider | symbol;
+  let sttProvider: SttProvider;
+  let sttModel: string;
+  let sttLanguage: string = "";
+  let sttApiKey: string = "";
 
-  if (isCancel(sttProvider)) {
-    c.outro("Setup cancelled.");
-    return;
-  }
+  const hasSttConfig = !!(existing.stt?.provider && existing.stt?.model);
 
-  const sttModel = (await c.text({
-    message: `STT model for ${STT_META[sttProvider].label}`,
-    initialValue: STT_META[sttProvider].defaultModel,
-    placeholder: STT_META[sttProvider].defaultModel,
-  })) as string | symbol;
-
-  if (isCancel(sttModel)) {
-    c.outro("Setup cancelled.");
-    return;
-  }
-
-  const sttLanguage = (await c.text({
-    message: "STT language code (e.g. fr, en-US, es) — leave blank to use provider default",
-    placeholder: "fr",
-  })) as string | symbol;
-
-  if (isCancel(sttLanguage)) {
-    c.outro("Setup cancelled.");
-    return;
-  }
-
-  const sttEnvName = providerEnvVar(sttProvider);
-  const sttEnvValue = sttEnvName ? process.env[sttEnvName] : undefined;
-  let sttApiKey: string | symbol = "";
-
-  if (sttEnvValue) {
-    const useEnv = await c.confirm({
-      message: `${sttEnvName} detected in environment. Use it for STT?`,
-      initialValue: true,
+  if (hasSttConfig) {
+    await c.log.info(
+      `  Current STT: ${existing.stt!.provider} / ${existing.stt!.model}` +
+        (existing.stt!.language ? ` (${existing.stt!.language})` : ""),
+    );
+    const reconfigureStt = await c.confirm({
+      message: "Reconfigure Speech-to-Text?",
+      initialValue: false,
     });
-    if (isCancel(useEnv)) {
+    if (isCancel(reconfigureStt)) {
       c.outro("Setup cancelled.");
       return;
     }
-    if (!useEnv) {
-      sttApiKey = (await c.text({
+    if (!reconfigureStt) {
+      sttProvider = existing.stt!.provider as SttProvider;
+      sttModel = existing.stt!.model!;
+      sttLanguage = existing.stt!.language ?? "";
+      sttApiKey = existing.stt!.apiKey ?? "";
+    }
+  }
+
+  // Only prompt if not already set from existing config.
+  if (!hasSttConfig || !sttModel!) {
+    const sttProviderResult = (await c.select({
+      message: "Speech-to-Text provider",
+      options: STT_PROVIDERS.map((id) => ({
+        value: id,
+        label: `${STT_META[id].label}`,
+        hint: providerEnvVar(id) ?? "",
+      })),
+      initialValue: (existing.stt?.provider as SttProvider) ?? ("deepgram" as SttProvider),
+    })) as SttProvider | symbol;
+
+    if (isCancel(sttProviderResult)) {
+      c.outro("Setup cancelled.");
+      return;
+    }
+    sttProvider = sttProviderResult;
+
+    const sttModelResult = (await c.text({
+      message: `STT model for ${STT_META[sttProvider].label}`,
+      initialValue: existing.stt?.model ?? STT_META[sttProvider].defaultModel,
+      placeholder: STT_META[sttProvider].defaultModel,
+    })) as string | symbol;
+
+    if (isCancel(sttModelResult)) {
+      c.outro("Setup cancelled.");
+      return;
+    }
+    sttModel = sttModelResult;
+
+    const sttLanguageResult = (await c.text({
+      message: "STT language code (e.g. fr, en-US, es) — leave blank to use provider default",
+      initialValue: existing.stt?.language ?? "",
+      placeholder: "fr",
+    })) as string | symbol;
+
+    if (isCancel(sttLanguageResult)) {
+      c.outro("Setup cancelled.");
+      return;
+    }
+    sttLanguage = sttLanguageResult;
+
+    const sttEnvName = providerEnvVar(sttProvider);
+    const sttEnvValue = sttEnvName ? process.env[sttEnvName] : undefined;
+
+    if (sttEnvValue) {
+      const useEnv = await c.confirm({
+        message: `${sttEnvName} detected in environment. Use it for STT?`,
+        initialValue: true,
+      });
+      if (isCancel(useEnv)) {
+        c.outro("Setup cancelled.");
+        return;
+      }
+      if (!useEnv) {
+        const keyResult = (await c.text({
+          message: `API key for ${STT_META[sttProvider].label} STT`,
+          placeholder: "sk-...",
+        })) as string | symbol;
+        if (isCancel(keyResult)) {
+          c.outro("Setup cancelled.");
+          return;
+        }
+        sttApiKey = keyResult;
+      }
+    } else {
+      const keyResult = (await c.text({
         message: `API key for ${STT_META[sttProvider].label} STT`,
         placeholder: "sk-...",
       })) as string | symbol;
+      if (isCancel(keyResult)) {
+        c.outro("Setup cancelled.");
+        return;
+      }
+      sttApiKey = keyResult;
     }
-  } else {
-    sttApiKey = (await c.text({
-      message: `API key for ${STT_META[sttProvider].label} STT`,
-      placeholder: "sk-...",
-    })) as string | symbol;
-  }
-
-  if (isCancel(sttApiKey)) {
-    c.outro("Setup cancelled.");
-    return;
   }
 
   // -- TTS ----------------------------------------------------------------
 
-  const ttsProvider = (await c.select({
-    message: "Text-to-Speech provider",
-    options: TTS_PROVIDERS.map((id) => ({
-      value: id,
-      label: `${TTS_META[id].label}`,
-      hint: providerEnvVar(id) ?? "",
-    })),
-    initialValue: "openai" as TtsProvider,
-  })) as TtsProvider | symbol;
+  let ttsProvider: TtsProvider;
+  let ttsModel: string;
+  let ttsVoice: string;
+  let ttsApiKey: string = "";
 
-  if (isCancel(ttsProvider)) {
-    c.outro("Setup cancelled.");
-    return;
-  }
+  const hasTtsConfig = !!(existing.tts?.provider && existing.tts?.model);
 
-  const ttsModel = (await c.text({
-    message: `TTS model for ${TTS_META[ttsProvider].label}`,
-    initialValue: TTS_META[ttsProvider].defaultModel,
-    placeholder: TTS_META[ttsProvider].defaultModel,
-  })) as string | symbol;
-
-  if (isCancel(ttsModel)) {
-    c.outro("Setup cancelled.");
-    return;
-  }
-
-  const ttsVoice = (await c.text({
-    message: `Voice name for ${TTS_META[ttsProvider].label}`,
-    initialValue: TTS_META[ttsProvider].defaultVoice,
-    placeholder: TTS_META[ttsProvider].defaultVoice,
-  })) as string | symbol;
-
-  if (isCancel(ttsVoice)) {
-    c.outro("Setup cancelled.");
-    return;
-  }
-
-  const ttsEnvName = providerEnvVar(ttsProvider);
-  const ttsEnvValue = ttsEnvName ? process.env[ttsEnvName] : undefined;
-  let ttsApiKey: string | symbol = "";
-
-  // If same provider as STT, offer to reuse the key.
-  if (sttProvider === ttsProvider && (sttApiKey || sttEnvValue)) {
-    const reuse = await c.confirm({
-      message: `Reuse the same ${STT_META[sttProvider].label} key for TTS?`,
-      initialValue: true,
+  if (hasTtsConfig) {
+    await c.log.info(
+      `  Current TTS: ${existing.tts!.provider} / ${existing.tts!.model}` +
+        (existing.tts!.voice ? ` (voice: ${existing.tts!.voice})` : ""),
+    );
+    const reconfigureTts = await c.confirm({
+      message: "Reconfigure Text-to-Speech?",
+      initialValue: false,
     });
-    if (isCancel(reuse)) {
+    if (isCancel(reconfigureTts)) {
       c.outro("Setup cancelled.");
       return;
     }
-    if (reuse) {
-      ttsApiKey = sttApiKey;
+    if (!reconfigureTts) {
+      ttsProvider = existing.tts!.provider as TtsProvider;
+      ttsModel = existing.tts!.model!;
+      ttsVoice = existing.tts!.voice ?? TTS_META[ttsProvider].defaultVoice;
+      ttsApiKey = existing.tts!.apiKey ?? "";
     }
   }
 
-  if (!ttsApiKey) {
-    if (ttsEnvValue) {
-      const useEnv = await c.confirm({
-        message: `${ttsEnvName} detected in environment. Use it for TTS?`,
+  if (!hasTtsConfig || !ttsModel!) {
+    const ttsProviderResult = (await c.select({
+      message: "Text-to-Speech provider",
+      options: TTS_PROVIDERS.map((id) => ({
+        value: id,
+        label: `${TTS_META[id].label}`,
+        hint: providerEnvVar(id) ?? "",
+      })),
+      initialValue: (existing.tts?.provider as TtsProvider) ?? ("openai" as TtsProvider),
+    })) as TtsProvider | symbol;
+
+    if (isCancel(ttsProviderResult)) {
+      c.outro("Setup cancelled.");
+      return;
+    }
+    ttsProvider = ttsProviderResult;
+
+    const ttsModelResult = (await c.text({
+      message: `TTS model for ${TTS_META[ttsProvider].label}`,
+      initialValue: existing.tts?.model ?? TTS_META[ttsProvider].defaultModel,
+      placeholder: TTS_META[ttsProvider].defaultModel,
+    })) as string | symbol;
+
+    if (isCancel(ttsModelResult)) {
+      c.outro("Setup cancelled.");
+      return;
+    }
+    ttsModel = ttsModelResult;
+
+    const ttsVoiceResult = (await c.text({
+      message: `Voice name for ${TTS_META[ttsProvider].label}`,
+      initialValue: existing.tts?.voice ?? TTS_META[ttsProvider].defaultVoice,
+      placeholder: TTS_META[ttsProvider].defaultVoice,
+    })) as string | symbol;
+
+    if (isCancel(ttsVoiceResult)) {
+      c.outro("Setup cancelled.");
+      return;
+    }
+    ttsVoice = ttsVoiceResult;
+
+    const ttsEnvName = providerEnvVar(ttsProvider);
+    const ttsEnvValue = ttsEnvName ? process.env[ttsEnvName] : undefined;
+
+    // If same provider as STT, offer to reuse the key.
+    if (sttProvider === ttsProvider && sttApiKey) {
+      const reuse = await c.confirm({
+        message: `Reuse the same ${STT_META[sttProvider].label} key for TTS?`,
         initialValue: true,
       });
-      if (isCancel(useEnv)) {
+      if (isCancel(reuse)) {
         c.outro("Setup cancelled.");
         return;
       }
-      if (!useEnv) {
-        ttsApiKey = (await c.text({
+      if (reuse) {
+        ttsApiKey = sttApiKey;
+      }
+    }
+
+    if (!ttsApiKey) {
+      if (ttsEnvValue) {
+        const useEnv = await c.confirm({
+          message: `${ttsEnvName} detected in environment. Use it for TTS?`,
+          initialValue: true,
+        });
+        if (isCancel(useEnv)) {
+          c.outro("Setup cancelled.");
+          return;
+        }
+        if (!useEnv) {
+          const keyResult = (await c.text({
+            message: `API key for ${TTS_META[ttsProvider].label} TTS`,
+            placeholder: "sk-...",
+          })) as string | symbol;
+          if (isCancel(keyResult)) {
+            c.outro("Setup cancelled.");
+            return;
+          }
+          ttsApiKey = keyResult;
+        }
+      } else {
+        const keyResult = (await c.text({
           message: `API key for ${TTS_META[ttsProvider].label} TTS`,
           placeholder: "sk-...",
         })) as string | symbol;
+        if (isCancel(keyResult)) {
+          c.outro("Setup cancelled.");
+          return;
+        }
+        ttsApiKey = keyResult;
       }
-    } else {
-      ttsApiKey = (await c.text({
-        message: `API key for ${TTS_META[ttsProvider].label} TTS`,
-        placeholder: "sk-...",
-      })) as string | symbol;
     }
-  }
-
-  if (isCancel(ttsApiKey)) {
-    c.outro("Setup cancelled.");
-    return;
   }
 
   // -- LLM ----------------------------------------------------------------
 
-  const llmProvider = (await c.select({
-    message: "LLM provider (for voice agent reasoning)",
-    options: LLM_PROVIDERS.map((id) => ({
-      value: id,
-      label: `${LLM_META[id].label}`,
-      hint: providerEnvVar(id) ?? "",
-    })),
-    initialValue: "openai" as LlmProvider,
-  })) as LlmProvider | symbol;
+  let llmProvider: LlmProvider;
+  let llmModel: string;
+  let llmApiKey: string = "";
 
-  if (isCancel(llmProvider)) {
-    c.outro("Setup cancelled.");
-    return;
-  }
+  const hasLlmConfig = !!(existing.llm?.provider && existing.llm?.model);
 
-  const llmModel = (await c.text({
-    message: `LLM model for ${LLM_META[llmProvider].label}`,
-    initialValue: LLM_META[llmProvider].defaultModel,
-    placeholder: LLM_META[llmProvider].defaultModel,
-  })) as string | symbol;
-
-  if (isCancel(llmModel)) {
-    c.outro("Setup cancelled.");
-    return;
-  }
-
-  const llmEnvName = providerEnvVar(llmProvider);
-  const llmEnvValue = llmEnvName ? process.env[llmEnvName] : undefined;
-  let llmApiKey: string | symbol = "";
-
-  // Offer reuse if same provider as STT or TTS.
-  const sameAsSTT = llmProvider === sttProvider && (sttApiKey || sttEnvValue);
-  const sameAsTTS = llmProvider === ttsProvider && (ttsApiKey || ttsEnvValue);
-
-  if (sameAsSTT || sameAsTTS) {
-    const reuse = await c.confirm({
-      message: `Reuse the same ${LLM_META[llmProvider].label} key for LLM?`,
-      initialValue: true,
+  if (hasLlmConfig) {
+    await c.log.info(`  Current LLM: ${existing.llm!.provider} / ${existing.llm!.model}`);
+    const reconfigureLlm = await c.confirm({
+      message: "Reconfigure LLM (voice agent reasoning)?",
+      initialValue: false,
     });
-    if (isCancel(reuse)) {
+    if (isCancel(reconfigureLlm)) {
       c.outro("Setup cancelled.");
       return;
     }
-    if (reuse) {
-      llmApiKey = sameAsSTT ? (sttApiKey as string) : (ttsApiKey as string);
+    if (!reconfigureLlm) {
+      llmProvider = existing.llm!.provider as LlmProvider;
+      llmModel = existing.llm!.model!;
+      llmApiKey = existing.llm!.apiKey ?? "";
     }
   }
 
-  if (!llmApiKey) {
-    if (llmEnvValue) {
-      const useEnv = await c.confirm({
-        message: `${llmEnvName} detected in environment. Use it for LLM?`,
+  if (!hasLlmConfig || !llmModel!) {
+    const llmProviderResult = (await c.select({
+      message: "LLM provider (for voice agent reasoning)",
+      options: LLM_PROVIDERS.map((id) => ({
+        value: id,
+        label: `${LLM_META[id].label}`,
+        hint: providerEnvVar(id) ?? "",
+      })),
+      initialValue: (existing.llm?.provider as LlmProvider) ?? ("openai" as LlmProvider),
+    })) as LlmProvider | symbol;
+
+    if (isCancel(llmProviderResult)) {
+      c.outro("Setup cancelled.");
+      return;
+    }
+    llmProvider = llmProviderResult;
+
+    const llmModelResult = (await c.text({
+      message: `LLM model for ${LLM_META[llmProvider].label}`,
+      initialValue: existing.llm?.model ?? LLM_META[llmProvider].defaultModel,
+      placeholder: LLM_META[llmProvider].defaultModel,
+    })) as string | symbol;
+
+    if (isCancel(llmModelResult)) {
+      c.outro("Setup cancelled.");
+      return;
+    }
+    llmModel = llmModelResult;
+
+    const llmEnvName = providerEnvVar(llmProvider);
+    const llmEnvValue = llmEnvName ? process.env[llmEnvName] : undefined;
+
+    // Offer reuse if same provider as STT or TTS.
+    const sameAsSTT = llmProvider === sttProvider && sttApiKey;
+    const sameAsTTS = llmProvider === ttsProvider && ttsApiKey;
+
+    if (sameAsSTT || sameAsTTS) {
+      const reuse = await c.confirm({
+        message: `Reuse the same ${LLM_META[llmProvider].label} key for LLM?`,
         initialValue: true,
       });
-      if (isCancel(useEnv)) {
+      if (isCancel(reuse)) {
         c.outro("Setup cancelled.");
         return;
       }
-      if (!useEnv) {
-        llmApiKey = (await c.text({
+      if (reuse) {
+        llmApiKey = sameAsSTT ? sttApiKey : ttsApiKey;
+      }
+    }
+
+    if (!llmApiKey) {
+      if (llmEnvValue) {
+        const useEnv = await c.confirm({
+          message: `${llmEnvName} detected in environment. Use it for LLM?`,
+          initialValue: true,
+        });
+        if (isCancel(useEnv)) {
+          c.outro("Setup cancelled.");
+          return;
+        }
+        if (!useEnv) {
+          const keyResult = (await c.text({
+            message: `API key for ${LLM_META[llmProvider].label} LLM`,
+            placeholder: "sk-...",
+          })) as string | symbol;
+          if (isCancel(keyResult)) {
+            c.outro("Setup cancelled.");
+            return;
+          }
+          llmApiKey = keyResult;
+        }
+      } else {
+        const keyResult = (await c.text({
           message: `API key for ${LLM_META[llmProvider].label} LLM`,
           placeholder: "sk-...",
         })) as string | symbol;
+        if (isCancel(keyResult)) {
+          c.outro("Setup cancelled.");
+          return;
+        }
+        llmApiKey = keyResult;
       }
-    } else {
-      llmApiKey = (await c.text({
-        message: `API key for ${LLM_META[llmProvider].label} LLM`,
-        placeholder: "sk-...",
-      })) as string | symbol;
     }
-  }
-
-  if (isCancel(llmApiKey)) {
-    c.outro("Setup cancelled.");
-    return;
   }
 
   // -- LiveKit (optional) --------------------------------------------------
 
+  let livekitUrl = existing.livekit?.url ?? "";
+  let livekitApiKey = existing.livekit?.apiKey ?? "";
+  let livekitApiSecret = existing.livekit?.apiSecret ?? "";
+
+  const hasLivekitConfig = !!existing.livekit?.url;
+
+  if (hasLivekitConfig) {
+    await c.log.info(`  Current LiveKit: ${existing.livekit!.url}`);
+  }
+
   const configureLivekit = await c.confirm({
-    message: "Configure LiveKit connection? (skip for local dev defaults)",
+    message: hasLivekitConfig
+      ? "Reconfigure LiveKit connection?"
+      : "Configure LiveKit connection? (skip for local dev defaults)",
     initialValue: false,
   });
 
@@ -388,14 +553,10 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
     return;
   }
 
-  let livekitUrl = "";
-  let livekitApiKey = "";
-  let livekitApiSecret = "";
-
   if (configureLivekit) {
     const url = await c.text({
       message: "LiveKit server URL",
-      initialValue: "ws://localhost:7880",
+      initialValue: existing.livekit?.url ?? "ws://localhost:7880",
       placeholder: "wss://your-livekit.livekit.cloud",
     });
     if (isCancel(url)) {
@@ -445,20 +606,16 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
     }
 
     if (wantInstall) {
-      const installSpinner = c.spinner();
-      installSpinner.start("Installing Tailscale...");
+      await c.log.step("Installing Tailscale (you may be prompted for your sudo password)...");
 
-      const result = await installTailscale((line) => {
-        installSpinner.message(line.slice(0, 80));
-      });
+      const result = await installTailscale();
 
       if (result.success) {
-        installSpinner.stop("Tailscale installed ✓");
+        await c.log.success("Tailscale installed ✓");
         // Re-check status after install.
         tsStatus = await getTailscaleStatus();
       } else {
-        installSpinner.stop("Tailscale installation failed.");
-        await c.log.warn(result.message);
+        await c.log.warn("Tailscale installation failed: " + result.message);
       }
     } else {
       await c.log.info(
@@ -480,21 +637,11 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
     }
 
     if (wantLogin) {
-      await c.log.info(
-        "Starting `tailscale up` — a browser link will appear below.\n" +
-          "Open it to authenticate, then come back here.",
+      await c.log.step(
+        "Running `sudo tailscale up` — follow the instructions below to authenticate.",
       );
 
-      const loginResult = await loginTailscale((line) => {
-        // Show auth URL prominently when detected.
-        if (line.includes("https://login.tailscale.com")) {
-          // Will be printed by the log below, but also let it flow.
-        }
-      });
-
-      if (loginResult.authUrl) {
-        await c.log.info(`\n  🔗 Open this URL to log in:\n  ${loginResult.authUrl}\n`);
-      }
+      const loginResult = await loginTailscale();
 
       if (loginResult.success) {
         await c.log.success("Tailscale login successful ✓");
