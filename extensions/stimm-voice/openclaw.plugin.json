@@ -200,6 +200,29 @@
             "default": "/voice"
           }
         }
+      },
+      "tunnel": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Remote access via Tailscale Funnel.",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": ["none", "tailscale-funnel"],
+            "default": "none",
+            "description": "Tunnel provider. 'none' = LAN-only, 'tailscale-funnel' = public via Tailscale."
+          },
+          "gatewayFunnelPort": {
+            "type": "number",
+            "default": 443,
+            "description": "Tailscale Funnel port for the gateway (443, 8443, or 10000)."
+          },
+          "livekitFunnelPort": {
+            "type": "number",
+            "default": 8443,
+            "description": "Tailscale Funnel port for LiveKit signaling (443, 8443, or 10000)."
+          }
+        }
       }
     }
   },
@@ -301,6 +324,20 @@
     "web.path": {
       "label": "Web Voice Path",
       "advanced": true
+    },
+    "tunnel.provider": {
+      "label": "Tunnel Provider",
+      "help": "'none' for LAN-only, 'tailscale-funnel' to expose publicly via Tailscale Funnel"
+    },
+    "tunnel.gatewayFunnelPort": {
+      "label": "Gateway Funnel Port",
+      "advanced": true,
+      "help": "Tailscale Funnel port for the gateway (443, 8443, or 10000)"
+    },
+    "tunnel.livekitFunnelPort": {
+      "label": "LiveKit Funnel Port",
+      "advanced": true,
+      "help": "Tailscale Funnel port for LiveKit signaling (443, 8443, or 10000)"
     }
   }
 }

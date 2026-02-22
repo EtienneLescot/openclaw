@@ -180,30 +180,16 @@ export async function installTailscale(onOutput?: (line: string) => void): Promi
 
   if (platform === "linux") {
     // Download install script then pipe to sudo sh.
+    // Use fully inherited stdio so sudo can prompt for password and user
+    // sees the install script progress directly.
     let proc: ReturnType<typeof spawn>;
     try {
       proc = spawn("sh", ["-c", "curl -fsSL https://tailscale.com/install.sh | sudo sh"], {
-        stdio: ["inherit", "pipe", "pipe"],
+        stdio: "inherit",
       });
     } catch {
       return { success: false, message: "Failed to spawn shell for install." };
     }
-
-    let stderr = "";
-    proc.on("error", () => {}); // prevent unhandled exception
-    proc.stdout?.on("data", (data: Buffer) => {
-      const text = data.toString();
-      if (onOutput) {
-        for (const line of text.split("\n").filter(Boolean)) onOutput(line);
-      }
-    });
-    proc.stderr?.on("data", (data: Buffer) => {
-      const text = data.toString();
-      stderr += text;
-      if (onOutput) {
-        for (const line of text.split("\n").filter(Boolean)) onOutput(line);
-      }
-    });
 
     const code = await new Promise<number>((resolve) => {
       proc.on("error", () => resolve(-1));
@@ -218,7 +204,7 @@ export async function installTailscale(onOutput?: (line: string) => void): Promi
     });
 
     if (code !== 0) {
-      return { success: false, message: `Install failed (exit ${code}): ${stderr.slice(-200)}` };
+      return { success: false, message: `Install failed (exit ${code}).` };
     }
     return { success: true, message: "Tailscale installed successfully." };
   }
@@ -257,41 +243,37 @@ export interface LoginResult {
 /**
  * Start Tailscale login. Runs `sudo tailscale up` which outputs an auth URL.
  *
- * The returned authUrl should be displayed to the user. The function resolves
- * once `tailscale up` completes (user finished auth) or times out.
+ * Uses fully inherited stdio so the user sees the auth URL and can interact
+ * with sudo. After the process exits, re-checks status to confirm login.
  */
-export async function loginTailscale(onOutput?: (line: string) => void): Promise<LoginResult> {
-  // `tailscale up` prints the auth URL to stderr and blocks until auth completes.
-  const authUrlPattern = /https:\/\/login\.tailscale\.com\/[^\s]+/;
-  let authUrl: string | null = null;
+export async function loginTailscale(): Promise<LoginResult> {
+  let proc: ReturnType<typeof spawn>;
+  try {
+    proc = spawn("sudo", ["tailscale", "up"], { stdio: "inherit" });
+  } catch {
+    return { success: false, authUrl: null, message: "Failed to spawn tailscale up." };
+  }
 
-  const { code, stderr } = await runSudoCommand("tailscale", ["up"], {
-    timeoutMs: 180_000, // 3 min for user to authenticate
-    onOutput: (line) => {
-      const match = authUrlPattern.exec(line);
-      if (match) authUrl = match[0];
-      onOutput?.(line);
-    },
+  const code = await new Promise<number>((resolve) => {
+    proc.on("error", () => resolve(-1));
+    const timer = setTimeout(() => {
+      proc.kill("SIGKILL");
+      resolve(-1);
+    }, 180_000); // 3 min for user to authenticate
+    proc.on("close", (c) => {
+      clearTimeout(timer);
+      resolve(c ?? -1);
+    });
   });
 
   if (code === 0) {
-    return {
-      success: true,
-      authUrl,
-      message: "Tailscale login successful.",
-    };
-  }
-
-  // Extract auth URL from stderr even if process was killed / timed out.
-  if (!authUrl) {
-    const match = authUrlPattern.exec(stderr);
-    if (match) authUrl = match[0];
+    return { success: true, authUrl: null, message: "Tailscale login successful." };
   }
 
   return {
     success: false,
-    authUrl,
-    message: `tailscale up exited with code ${code}. ${stderr.slice(-200)}`,
+    authUrl: null,
+    message: `tailscale up exited with code ${code}.`,
   };
 }
 
