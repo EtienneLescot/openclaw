@@ -49,7 +49,6 @@ import aiohttp
 from livekit.agents import WorkerOptions, cli
 
 from stimm import ConversationSupervisor
-from stimm.worker import make_entrypoint
 
 logger = logging.getLogger("openclaw.voice")
 
@@ -125,7 +124,12 @@ def _supervisor_factory(room_name: str, channel: str) -> OpenClawSupervisor:
     )
 
 
-entrypoint = make_entrypoint(_supervisor_factory)
+# Top-level function so multiprocessing can pickle it (closures are not picklable).
+async def entrypoint(ctx):  # type: ignore[no-untyped-def]
+    from stimm.worker import make_entrypoint as _make
+
+    await _make(_supervisor_factory)(ctx)
+
 
 if __name__ == "__main__":
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))

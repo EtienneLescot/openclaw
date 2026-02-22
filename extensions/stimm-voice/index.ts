@@ -538,7 +538,7 @@ class LiveKitRuntime {
     const roomName = opts.roomName ?? `stimm-${randomHex(8)}`;
     await this.roomService.createRoom({ name: roomName });
 
-    const clientToken = this.generateToken({
+    const clientToken = await this.generateToken({
       identity: "user",
       roomName,
       canPublish: true,
@@ -580,14 +580,14 @@ class LiveKitRuntime {
     await Promise.allSettled(rooms.map((r) => this.endSession(r)));
   }
 
-  private generateToken(opts: {
+  private async generateToken(opts: {
     identity: string;
     roomName: string;
     canPublish?: boolean;
     canSubscribe?: boolean;
     canPublishData?: boolean;
     ttlSeconds?: number;
-  }): string {
+  }): Promise<string> {
     const token = new AccessToken(this.config.livekit.apiKey, this.config.livekit.apiSecret, {
       identity: opts.identity,
       ttl: opts.ttlSeconds ?? 3600,
@@ -600,7 +600,7 @@ class LiveKitRuntime {
       canPublishData: opts.canPublishData ?? true,
     };
     token.addGrant(grant);
-    return token.toJwt() as unknown as string;
+    return await token.toJwt();
   }
 }
 
