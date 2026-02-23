@@ -453,6 +453,23 @@ const stimmVoicePlugin = {
             text: body.history,
           });
 
+          if (result.debug) {
+            api.logger.info(
+              `[stimm-voice] Supervisor debug (${body.roomName}, ${body.channel ?? "web"}): ` +
+                `provider=${result.debug.provider} model=${result.debug.model} ` +
+                `payloads=${result.debug.payloadCount} nonErrorTexts=${result.debug.nonErrorTextCount} ` +
+                `aborted=${result.debug.aborted}`,
+            );
+            if (result.debug.payloadPreview.length > 0) {
+              api.logger.info(
+                `[stimm-voice] Supervisor payload preview (${body.roomName}, ${body.channel ?? "web"}):\n` +
+                  result.debug.payloadPreview
+                    .map((p, i) => `${i + 1}. error=${p.isError} text="${p.text}"`)
+                    .join("\n"),
+              );
+            }
+          }
+
           if (result.error) {
             api.logger.error(`[stimm-voice] Agent error: ${result.error}`);
           }
