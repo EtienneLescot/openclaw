@@ -86,8 +86,12 @@ class OpenClawSupervisor(ConversationSupervisor):
         self.room_name = room_name
         self.channel = channel
 
-    async def process(self, history: str) -> str:
-        """POST history to the OpenClaw /stimm/supervisor endpoint."""
+    async def process(self, history: str, system_prompt: str | None) -> str:
+        """POST history + backend system prompt to OpenClaw /stimm/supervisor."""
+        return await self._post_to_openclaw(history=history, system_prompt=system_prompt)
+
+    async def _post_to_openclaw(self, *, history: str, system_prompt: str | None) -> str:
+        """POST payload to the OpenClaw /stimm/supervisor endpoint."""
         try:
             async with aiohttp.ClientSession() as http:
                 async with http.post(
@@ -96,6 +100,7 @@ class OpenClawSupervisor(ConversationSupervisor):
                         "roomName": self.room_name,
                         "channel": self.channel,
                         "history": history,
+                        "systemPrompt": system_prompt,
                     },
                     timeout=aiohttp.ClientTimeout(total=30),
                 ) as resp:

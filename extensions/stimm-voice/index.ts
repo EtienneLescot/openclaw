@@ -431,6 +431,7 @@ const stimmVoicePlugin = {
             roomName: string;
             channel: string;
             history: string;
+            systemPrompt?: string;
           };
 
           if (!body.roomName || !body.history) {
@@ -439,18 +440,28 @@ const stimmVoicePlugin = {
             return;
           }
 
+          const historyForLogs = extractConversationHistoryForLogs(body.history);
+
           api.logger.info(
-            `[stimm-voice] Processing transcript from ${body.roomName} (${body.channel ?? "web"}): "${body.history.slice(0, 80)}"`,
+            `[stimm-voice] Processing transcript from ${body.roomName} (${body.channel ?? "web"}): "${historyForLogs.slice(0, 80)}"`,
           );
           api.logger.info(
-            `[stimm-voice] Supervisor history (${body.roomName}, ${body.channel ?? "web"}):\n${body.history}`,
+            `[stimm-voice] Supervisor history (${body.roomName}, ${body.channel ?? "web"}):\n${historyForLogs}`,
           );
+          if (typeof body.systemPrompt === "string" && body.systemPrompt.trim().length > 0) {
+            api.logger.info(
+              `[stimm-voice] Supervisor system prompt (${body.roomName}, ${body.channel ?? "web"}): ` +
+                `${body.systemPrompt.slice(0, 120)}${body.systemPrompt.length > 120 ? "…" : ""}`,
+            );
+          }
 
           const result = await generateStimmResponse({
             coreConfig,
             roomName: body.roomName,
             channel: body.channel ?? "web",
             text: body.history,
+            extraSystemPrompt:
+              typeof body.systemPrompt === "string" ? body.systemPrompt : undefined,
           });
 
           if (result.debug) {
@@ -652,6 +663,14 @@ function randomHex(bytes: number): string {
   const array = new Uint8Array(bytes);
   crypto.getRandomValues(array);
   return [...array].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Strip supervisor preamble from logs while keeping runtime payload unchanged. */
+function extractConversationHistoryForLogs(input: string): string {
+  const marker = "Conversation history:";
+  const idx = input.indexOf(marker);
+  if (idx === -1) return input;
+  return input.slice(idx + marker.length).trimStart();
 }
 
 /** Serialize a VoiceSession for gateway/tool responses. */
