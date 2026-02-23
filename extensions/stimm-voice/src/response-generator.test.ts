@@ -13,7 +13,6 @@ vi.mock("./core-bridge.js", () => ({
   loadCoreAgentDeps: vi.fn(async () => ({
     resolveAgentDir: () => "/tmp/agent",
     resolveAgentWorkspaceDir: () => "/tmp/agent/workspace",
-    resolveAgentIdentity: () => ({ name: "TestBot" }),
     resolveThinkingDefault: () => "off",
     runEmbeddedPiAgent: mockRunEmbeddedPiAgent,
     resolveAgentTimeoutMs: () => 30_000,
@@ -170,7 +169,7 @@ describe("generateStimmResponse", () => {
     );
   });
 
-  it("builds a system prompt with agent name and channel/room info", async () => {
+  it("does not inject an extra system prompt by default", async () => {
     await generateStimmResponse({
       coreConfig: baseCoreConfig,
       roomName: "my-room",
@@ -180,17 +179,23 @@ describe("generateStimmResponse", () => {
 
     expect(mockRunEmbeddedPiAgent).toHaveBeenCalledWith(
       expect.objectContaining({
-        extraSystemPrompt: expect.stringContaining("TestBot"),
+        extraSystemPrompt: undefined,
       }),
     );
+  });
+
+  it("passes through an explicit extra system prompt override", async () => {
+    await generateStimmResponse({
+      coreConfig: baseCoreConfig,
+      roomName: "my-room",
+      channel: "whatsapp",
+      text: "test prompt",
+      extraSystemPrompt: "explicit supervisor override",
+    });
+
     expect(mockRunEmbeddedPiAgent).toHaveBeenCalledWith(
       expect.objectContaining({
-        extraSystemPrompt: expect.stringContaining("whatsapp"),
-      }),
-    );
-    expect(mockRunEmbeddedPiAgent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        extraSystemPrompt: expect.stringContaining("my-room"),
+        extraSystemPrompt: "explicit supervisor override",
       }),
     );
   });
