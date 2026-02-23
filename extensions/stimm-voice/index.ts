@@ -6,17 +6,23 @@
  * reasoning, tools, and context via the Stimm data-channel protocol.
  */
 
+import { createHmac, randomBytes, timingSafeEqual, webcrypto } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Type } from "@sinclair/typebox";
-import { AccessToken, RoomServiceClient, type VideoGrant } from "livekit-server-sdk";
+import {
+  AccessToken,
+  AgentDispatchClient,
+  RoomServiceClient,
+  type VideoGrant,
+} from "livekit-server-sdk";
 import type { GatewayRequestHandlerOptions, OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { AgentProcess } from "./src/agent-process.js";
 import { registerStimmVoiceCli } from "./src/cli.js";
 import { resolveStimmVoiceConfig, type StimmVoiceConfig } from "./src/config.js";
 import type { CoreConfig } from "./src/core-bridge.js";
+import { startQuickTunnel, type QuickTunnelRuntime } from "./src/quick-tunnel.js";
 import { generateStimmResponse } from "./src/response-generator.js";
-import { setupTunnel, cleanupTunnel, type TunnelInfo } from "./src/tunnel.js";
 
 // ---------------------------------------------------------------------------
 // Tool schema — flat object, no Type.Union (per repo guardrails).
@@ -60,6 +66,59 @@ const StimmVoiceToolSchema = Type.Object({
   ),
 });
 
+type ClaimRecord = {
+  claimId: string;
+  roomName: string;
+  channel: string;
+  clientToken: string;
+  livekitUrl?: string;
+  expiresAt: number;
+  usedAt?: number;
+};
+
+type TunnelInfo = {
+  gatewayUrl: string;
+  livekitUrl: string;
+};
+
+type SessionPayload = {
+  room: string;
+  clientToken: string;
+  channel: string;
+  createdAt: number;
+  livekitUrl?: string;
+  claimToken?: string;
+  shareUrl?: string;
+};
+
+function getGatewayPort(config: CoreConfig): number {
+  return (
+    (config as Record<string, unknown> & { gateway?: { port?: number } }).gateway?.port ?? 18789
+  );
+}
+
+function getRequestIp(req: {
+  socket?: { remoteAddress?: string | null };
+  headers?: Record<string, unknown>;
+}): string {
+  const xff = req.headers?.["x-forwarded-for"];
+  if (typeof xff === "string" && xff.trim()) {
+    return xff.split(",")[0]?.trim() || "unknown";
+  }
+  return req.socket?.remoteAddress ?? "unknown";
+}
+
+function signClaim(payloadB64: string, secret: string): string {
+  return createHmac("sha256", secret).update(payloadB64).digest("base64url");
+}
+
+function verifyClaimSignature(payloadB64: string, signature: string, secret: string): boolean {
+  const expected = Buffer.from(signClaim(payloadB64, secret));
+  const provided = Buffer.from(signature);
+  if (expected.length !== provided.length) return false;
+  return timingSafeEqual(expected, provided);
+}
+
 // ---------------------------------------------------------------------------
 // Plugin definition
 // ---------------------------------------------------------------------------
@@ -87,6 +146,14 @@ const stimmVoicePlugin = {
     let lkRuntime: LiveKitRuntime | null = null;
     let agentProcess: AgentProcess | null = null;
     let tunnelInfo: TunnelInfo | null = null;
+    let quickTunnel: QuickTunnelRuntime | null = null;
+    // Keep claim signing stable across different OpenClaw processes (CLI vs gateway).
+    // If no explicit supervisor secret is configured, fall back to LiveKit API secret.
+    const claimSecret = config.access.supervisorSecret || `livekit:${config.livekit.apiSecret}`;
+    const claimStore = new Map<string, ClaimRecord>();
+    const consumedClaims = new Map<string, number>();
+    const claimRateWindowMs = 60_000;
+    const claimRateByIp = new Map<string, number[]>();
 
     const ensureRuntime = async (): Promise<{ lk: LiveKitRuntime }> => {
       if (!config.enabled) {
@@ -96,6 +163,197 @@ const stimmVoicePlugin = {
         lkRuntime = new LiveKitRuntime(config);
       }
       return { lk: lkRuntime };
+    };
+
+    const ensureQuickTunnel = async (): Promise<TunnelInfo | null> => {
+      if (config.access.mode !== "quick-tunnel") return null;
+      if (quickTunnel?.running()) {
+        return {
+          gatewayUrl: quickTunnel.info.voiceUrl,
+          livekitUrl: config.livekit.url,
+        };
+      }
+      const gatewayPort = getGatewayPort(api.config as CoreConfig);
+      const started = await startQuickTunnel({
+        gatewayPort,
+        webPath: config.web.path,
+        logger: api.logger,
+      });
+      if (!started) return null;
+      quickTunnel = started;
+      return {
+        gatewayUrl: started.info.voiceUrl,
+        livekitUrl: config.livekit.url,
+      };
+    };
+
+    const ensureAgentProcessStarted = (): void => {
+      if (!config.voiceAgent.spawn.autoSpawn) return;
+
+      if (agentProcess?.running) return;
+      if (agentProcess) {
+        // Reuse existing process wrapper (restart/backoff state), only re-spawn child.
+        agentProcess.start();
+        return;
+      }
+
+      const pythonPath =
+        config.voiceAgent.spawn.pythonPath || AgentProcess.resolveDefaultPythonPath(extensionDir);
+      const agentScript =
+        config.voiceAgent.spawn.agentScript || AgentProcess.resolveDefaultAgentScript(extensionDir);
+
+      // Forward per-pipeline provider config as STIMM_* env vars.
+      const gatewayPort = getGatewayPort(api.config as CoreConfig);
+      const env: Record<string, string> = {
+        STIMM_AGENT_NAME: "stimm-voice",
+        STIMM_PARTICIPANT_IDENTITY: "user",
+        STIMM_STT_PROVIDER: config.voiceAgent.stt.provider,
+        STIMM_STT_MODEL: config.voiceAgent.stt.model,
+        STIMM_TTS_PROVIDER: config.voiceAgent.tts.provider,
+        STIMM_TTS_MODEL: config.voiceAgent.tts.model,
+        STIMM_TTS_VOICE: config.voiceAgent.tts.voice,
+        STIMM_LLM_PROVIDER: config.voiceAgent.llm.provider,
+        STIMM_LLM_MODEL: config.voiceAgent.llm.model,
+        STIMM_BUFFERING: config.voiceAgent.bufferingLevel,
+        STIMM_MODE: config.voiceAgent.mode,
+        // Supervisor callback — Python OpenClawSupervisor posts here.
+        OPENCLAW_SUPERVISOR_URL: `http://127.0.0.1:${gatewayPort}/stimm/supervisor`,
+      };
+      if (config.access.supervisorSecret) {
+        env.OPENCLAW_SUPERVISOR_SECRET = config.access.supervisorSecret;
+      }
+      // Per-pipeline API keys (only set if resolved).
+      if (config.voiceAgent.stt.apiKey) env.STIMM_STT_API_KEY = config.voiceAgent.stt.apiKey;
+      if (config.voiceAgent.tts.apiKey) env.STIMM_TTS_API_KEY = config.voiceAgent.tts.apiKey;
+      if (config.voiceAgent.llm.apiKey) env.STIMM_LLM_API_KEY = config.voiceAgent.llm.apiKey;
+      // Language (optional).
+      if (config.voiceAgent.stt.language) {
+        env.STIMM_STT_LANGUAGE = config.voiceAgent.stt.language;
+      }
+
+      agentProcess = new AgentProcess({
+        pythonPath,
+        agentScript,
+        livekitUrl: config.livekit.url,
+        livekitApiKey: config.livekit.apiKey,
+        livekitApiSecret: config.livekit.apiSecret,
+        env,
+        maxRestarts: config.voiceAgent.spawn.maxRestarts,
+        logger: api.logger,
+      });
+      agentProcess.start();
+    };
+
+    const createClaim = (params: { roomName: string; channel: string }): string => {
+      const now = Date.now();
+      const session = lkRuntime?.getSession(params.roomName);
+      if (!session) {
+        throw new Error("session not found");
+      }
+      const claim: ClaimRecord = {
+        claimId: randomBytes(16).toString("hex"),
+        roomName: params.roomName,
+        channel: params.channel,
+        clientToken: session.clientToken,
+        livekitUrl: tunnelInfo?.livekitUrl ?? config.livekit.url,
+        expiresAt: now + config.access.claimTtlSeconds * 1000,
+      };
+      claimStore.set(claim.claimId, claim);
+      const payloadB64 = Buffer.from(JSON.stringify(claim), "utf8").toString("base64url");
+      const signature = signClaim(payloadB64, claimSecret);
+      return `${payloadB64}.${signature}`;
+    };
+
+    const verifyAndConsumeClaim = (token: string): ClaimRecord | null => {
+      const [payloadB64, signature] = token.split(".");
+      if (!payloadB64 || !signature) return null;
+      if (!verifyClaimSignature(payloadB64, signature, claimSecret)) return null;
+      let parsed: ClaimRecord;
+      try {
+        parsed = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8")) as ClaimRecord;
+      } catch {
+        return null;
+      }
+      if (
+        typeof parsed.claimId !== "string" ||
+        typeof parsed.roomName !== "string" ||
+        typeof parsed.channel !== "string" ||
+        typeof parsed.clientToken !== "string" ||
+        typeof parsed.expiresAt !== "number"
+      ) {
+        return null;
+      }
+      const now = Date.now();
+      if (parsed.expiresAt < now) return null;
+
+      // Cleanup consumed claim markers.
+      for (const [claimId, expiry] of consumedClaims.entries()) {
+        if (expiry < now) consumedClaims.delete(claimId);
+      }
+
+      // If this process has seen this claim already, reject.
+      if (consumedClaims.has(parsed.claimId)) return null;
+
+      const stored = claimStore.get(parsed.claimId);
+      if (stored) {
+        if (stored.usedAt || stored.expiresAt < now) {
+          claimStore.delete(parsed.claimId);
+          return null;
+        }
+        stored.usedAt = now;
+        claimStore.set(stored.claimId, stored);
+        consumedClaims.set(parsed.claimId, stored.expiresAt);
+        return stored;
+      }
+
+      // Stateless fallback: allow signed, unexpired claims created by another process.
+      consumedClaims.set(parsed.claimId, parsed.expiresAt);
+      return parsed;
+    };
+
+    const enforceClaimRateLimit = (ip: string): boolean => {
+      const now = Date.now();
+      const windowStart = now - claimRateWindowMs;
+      const existing = claimRateByIp.get(ip) ?? [];
+      const recent = existing.filter((ts) => ts >= windowStart);
+      if (recent.length >= config.access.claimRateLimitPerMinute) {
+        claimRateByIp.set(ip, recent);
+        return false;
+      }
+      recent.push(now);
+      claimRateByIp.set(ip, recent);
+      return true;
+    };
+
+    const createSessionWithAccess = async (params: {
+      roomName?: string;
+      channel: string;
+    }): Promise<SessionPayload> => {
+      ensureAgentProcessStarted();
+      const rt = await ensureRuntime();
+      const session = await rt.lk.createSession({
+        roomName: params.roomName,
+        originChannel: params.channel,
+        ttlSeconds: config.access.livekitTokenTtlSeconds,
+      });
+
+      if (config.access.mode === "quick-tunnel") {
+        tunnelInfo = await ensureQuickTunnel();
+      }
+
+      const payload = sessionPayload(session, tunnelInfo);
+      if (tunnelInfo?.gatewayUrl) {
+        const claim = createClaim({
+          roomName: session.roomName,
+          channel: params.channel,
+        });
+        return {
+          ...payload,
+          claimToken: claim,
+          shareUrl: `${tunnelInfo.gatewayUrl}?claim=${encodeURIComponent(claim)}&v=${Date.now()}`,
+        };
+      }
+      return payload;
     };
 
     // -- Gateway methods ----------------------------------------------------
@@ -108,12 +366,11 @@ const stimmVoicePlugin = {
       "stimm.start",
       async ({ params, respond }: GatewayRequestHandlerOptions) => {
         try {
-          const rt = await ensureRuntime();
-          const session = await rt.lk.createSession({
+          const session = await createSessionWithAccess({
             roomName: typeof params?.room === "string" ? params.room : undefined,
-            originChannel: typeof params?.channel === "string" ? params.channel : "web",
+            channel: typeof params?.channel === "string" ? params.channel : "web",
           });
-          respond(true, sessionPayload(session, tunnelInfo));
+          respond(true, session);
         } catch (err) {
           sendError(respond, err);
         }
@@ -230,11 +487,11 @@ const stimmVoicePlugin = {
 
           switch (action) {
             case "start_session": {
-              const session = await rt.lk.createSession({
+              const session = await createSessionWithAccess({
                 roomName: typeof params.room === "string" ? params.room : undefined,
-                originChannel: typeof params.channel === "string" ? params.channel : "web",
+                channel: typeof params.channel === "string" ? params.channel : "web",
               });
-              return json(sessionPayload(session, tunnelInfo));
+              return json(session);
             }
 
             case "end_session": {
@@ -322,7 +579,33 @@ const stimmVoicePlugin = {
           config,
           ensureRuntime: async () => {
             const rt = await ensureRuntime();
-            return { lk: rt.lk };
+            const roomManager = {
+              createSession: async (opts: { roomName?: string; originChannel: string }) => {
+                const payload = await createSessionWithAccess({
+                  roomName: opts.roomName,
+                  channel: opts.originChannel,
+                });
+                return {
+                  roomName: payload.room,
+                  clientToken: payload.clientToken,
+                  createdAt: payload.createdAt,
+                  originChannel: payload.channel,
+                  supervisor: { connected: Boolean(agentProcess?.running) },
+                  shareUrl: payload.shareUrl,
+                  claimToken: payload.claimToken,
+                };
+              },
+              endSession: async (room: string) => rt.lk.endSession(room),
+              listSessions: () =>
+                rt.lk.listSessions().map((s) => ({
+                  roomName: s.roomName,
+                  clientToken: s.clientToken,
+                  createdAt: s.createdAt,
+                  originChannel: s.originChannel,
+                  supervisor: { connected: Boolean(agentProcess?.running) },
+                })),
+            };
+            return { roomManager };
           },
           logger: api.logger,
           extensionDir,
@@ -337,66 +620,16 @@ const stimmVoicePlugin = {
       start: async () => {
         if (!config.enabled) return;
         api.logger.info("[stimm-voice] Service started.");
+        ensureAgentProcessStarted();
 
-        // Auto-spawn the Python voice agent if configured.
-        if (config.voiceAgent.spawn.autoSpawn) {
-          const pythonPath =
-            config.voiceAgent.spawn.pythonPath ||
-            AgentProcess.resolveDefaultPythonPath(extensionDir);
-          const agentScript =
-            config.voiceAgent.spawn.agentScript ||
-            AgentProcess.resolveDefaultAgentScript(extensionDir);
-
-          // Forward per-pipeline provider config as STIMM_* env vars.
-          const gatewayPort =
-            (api.config as Record<string, unknown> & { gateway?: { port?: number } }).gateway
-              ?.port ?? 18789;
-          const env: Record<string, string> = {
-            STIMM_STT_PROVIDER: config.voiceAgent.stt.provider,
-            STIMM_STT_MODEL: config.voiceAgent.stt.model,
-            STIMM_TTS_PROVIDER: config.voiceAgent.tts.provider,
-            STIMM_TTS_MODEL: config.voiceAgent.tts.model,
-            STIMM_TTS_VOICE: config.voiceAgent.tts.voice,
-            STIMM_LLM_PROVIDER: config.voiceAgent.llm.provider,
-            STIMM_LLM_MODEL: config.voiceAgent.llm.model,
-            STIMM_BUFFERING: config.voiceAgent.bufferingLevel,
-            STIMM_MODE: config.voiceAgent.mode,
-            // Supervisor callback — Python OpenClawSupervisor posts here.
-            OPENCLAW_SUPERVISOR_URL: `http://127.0.0.1:${gatewayPort}/stimm/supervisor`,
-          };
-          // Per-pipeline API keys (only set if resolved).
-          if (config.voiceAgent.stt.apiKey) env.STIMM_STT_API_KEY = config.voiceAgent.stt.apiKey;
-          if (config.voiceAgent.tts.apiKey) env.STIMM_TTS_API_KEY = config.voiceAgent.tts.apiKey;
-          if (config.voiceAgent.llm.apiKey) env.STIMM_LLM_API_KEY = config.voiceAgent.llm.apiKey;
-          // Language (optional).
-          if (config.voiceAgent.stt.language) {
-            env.STIMM_STT_LANGUAGE = config.voiceAgent.stt.language;
-          }
-
-          agentProcess = new AgentProcess({
-            pythonPath,
-            agentScript,
-            livekitUrl: config.livekit.url,
-            livekitApiKey: config.livekit.apiKey,
-            livekitApiSecret: config.livekit.apiSecret,
-            env,
-            maxRestarts: config.voiceAgent.spawn.maxRestarts,
-            logger: api.logger,
-          });
-          agentProcess.start();
-        }
-
-        // Set up tunnel (Tailscale Funnel) if configured.
-        if (config.tunnel.provider !== "none") {
-          const gatewayPort =
-            (api.config as Record<string, unknown> & { gateway?: { port?: number } }).gateway
-              ?.port ?? 18789;
-          tunnelInfo = await setupTunnel(config, gatewayPort, api.logger);
-        }
+        // Start the quick tunnel lazily (only when a session is created).
       },
       stop: async () => {
-        // Clean up tunnel routes.
-        await cleanupTunnel(config);
+        // Clean up quick tunnel.
+        if (quickTunnel) {
+          quickTunnel.stop();
+          quickTunnel = null;
+        }
         tunnelInfo = null;
 
         // Stop the Python agent first.
@@ -422,6 +655,16 @@ const stimmVoicePlugin = {
           res.writeHead(405);
           res.end();
           return;
+        }
+        if (config.access.supervisorSecret) {
+          const provided = req.headers["x-stimm-supervisor-secret"];
+          const expected = Buffer.from(config.access.supervisorSecret, "utf8");
+          const actual = Buffer.from(typeof provided === "string" ? provided : "", "utf8");
+          if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+            res.writeHead(401, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "unauthorized" }));
+            return;
+          }
         }
         try {
           const coreConfig = api.config as CoreConfig;
@@ -514,18 +757,70 @@ const stimmVoicePlugin = {
     // -- HTTP route (web voice endpoint) ------------------------------------
 
     if (config.web.enabled) {
+      const claimPath = `${config.web.path.replace(/\/+$/, "")}/claim`;
+
+      api.registerHttpRoute({
+        path: claimPath,
+        handler: async (req, res) => {
+          if (req.method !== "POST") {
+            res.writeHead(405);
+            res.end();
+            return;
+          }
+          const ip = getRequestIp(req);
+          if (!enforceClaimRateLimit(ip)) {
+            res.writeHead(429, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "rate_limited" }));
+            return;
+          }
+          try {
+            const chunks: Buffer[] = [];
+            for await (const chunk of req) chunks.push(chunk as Buffer);
+            const body = JSON.parse(Buffer.concat(chunks).toString()) as { claim?: string };
+            const claim = typeof body.claim === "string" ? body.claim.trim() : "";
+            const record = claim ? verifyAndConsumeClaim(claim) : null;
+            if (!record) {
+              res.writeHead(401, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: "invalid_or_expired_claim" }));
+              return;
+            }
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                room: record.roomName,
+                clientToken: record.clientToken,
+                channel: record.channel,
+                ...(record.livekitUrl ? { livekitUrl: record.livekitUrl } : {}),
+              }),
+            );
+          } catch (err) {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+          }
+        },
+      });
+
       api.registerHttpRoute({
         path: config.web.path,
         handler: async (req, res) => {
           if (req.method === "POST") {
-            // Start a new session and return client token for the browser SDK.
+            // Direct session creation is disabled by default for public safety.
+            if (!config.access.allowDirectWebSessionCreate) {
+              res.writeHead(403, { "Content-Type": "application/json" });
+              res.end(
+                JSON.stringify({
+                  error: "direct_web_session_create_disabled",
+                  hint: `Use a claim link and POST ${claimPath} instead.`,
+                }),
+              );
+              return;
+            }
             try {
-              const rt = await ensureRuntime();
-              const session = await rt.lk.createSession({
-                originChannel: "web",
+              const session = await createSessionWithAccess({
+                channel: "web",
               });
               res.writeHead(200, { "Content-Type": "application/json" });
-              res.end(JSON.stringify(sessionPayload(session, tunnelInfo)));
+              res.end(JSON.stringify(session));
             } catch (err) {
               res.writeHead(500, { "Content-Type": "application/json" });
               res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
@@ -543,7 +838,7 @@ const stimmVoicePlugin = {
                 JSON.stringify({
                   plugin: "stimm-voice",
                   status: config.enabled ? "enabled" : "disabled",
-                  hint: "POST to this endpoint to start a web voice session.",
+                  hint: `Use a claim link and POST ${claimPath} to exchange claim for session token.`,
                 }),
               );
             }
@@ -567,7 +862,9 @@ export default stimmVoicePlugin;
 class LiveKitRuntime {
   private sessions = new Map<string, VoiceSessionInternal>();
   private roomService: RoomServiceClient;
+  private dispatchService: AgentDispatchClient;
   private config: StimmVoiceConfig;
+  private static readonly AGENT_NAME = "stimm-voice";
 
   constructor(config: StimmVoiceConfig) {
     this.config = config;
@@ -577,14 +874,26 @@ class LiveKitRuntime {
       config.livekit.apiKey,
       config.livekit.apiSecret,
     );
+    this.dispatchService = new AgentDispatchClient(
+      httpUrl,
+      config.livekit.apiKey,
+      config.livekit.apiSecret,
+    );
   }
 
   async createSession(opts: {
     roomName?: string;
     originChannel?: string;
+    ttlSeconds?: number;
   }): Promise<VoiceSessionInternal> {
     const roomName = opts.roomName ?? `stimm-${randomHex(8)}`;
     await this.roomService.createRoom({ name: roomName });
+    await this.dispatchService.createDispatch(roomName, LiveKitRuntime.AGENT_NAME, {
+      metadata: JSON.stringify({
+        source: "openclaw-stimm-voice",
+        originChannel: opts.originChannel ?? "web",
+      }),
+    });
 
     const clientToken = await this.generateToken({
       identity: "user",
@@ -592,6 +901,7 @@ class LiveKitRuntime {
       canPublish: true,
       canSubscribe: true,
       canPublishData: true,
+      ttlSeconds: opts.ttlSeconds,
     });
 
     const session: VoiceSessionInternal = {
@@ -621,6 +931,26 @@ class LiveKitRuntime {
 
   listSessions(): VoiceSessionInternal[] {
     return [...this.sessions.values()];
+  }
+
+  async issueClientToken(
+    roomName: string,
+    opts: {
+      ttlSeconds?: number;
+      identity?: string;
+    } = {},
+  ): Promise<string> {
+    if (!this.sessions.has(roomName)) {
+      throw new Error("session not found");
+    }
+    return await this.generateToken({
+      identity: opts.identity ?? "user",
+      roomName,
+      canPublish: true,
+      canSubscribe: true,
+      canPublishData: true,
+      ttlSeconds: opts.ttlSeconds,
+    });
   }
 
   async stopAll(): Promise<void> {
@@ -661,7 +991,7 @@ interface VoiceSessionInternal {
 
 function randomHex(bytes: number): string {
   const array = new Uint8Array(bytes);
-  crypto.getRandomValues(array);
+  webcrypto.getRandomValues(array);
   return [...array].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
@@ -674,7 +1004,7 @@ function extractConversationHistoryForLogs(input: string): string {
 }
 
 /** Serialize a VoiceSession for gateway/tool responses. */
-function sessionPayload(session: VoiceSessionInternal, tunnel?: TunnelInfo | null) {
+function sessionPayload(session: VoiceSessionInternal, tunnel?: TunnelInfo | null): SessionPayload {
   return {
     room: session.roomName,
     clientToken: session.clientToken,

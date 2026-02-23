@@ -1,7 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
 import { registerStimmVoiceCli } from "./cli.js";
 import type { StimmVoiceConfig } from "./config.js";
-import type { RoomManager, VoiceSession } from "./room-manager.js";
+
+type VoiceSession = {
+  roomName: string;
+  clientToken: string;
+  createdAt: number;
+  originChannel: string;
+  supervisor: { connected: boolean };
+  shareUrl?: string;
+  claimToken?: string;
+};
+
+type RoomManager = {
+  createSession: (opts: { roomName?: string; originChannel: string }) => Promise<VoiceSession>;
+  endSession: (room: string) => Promise<boolean>;
+  listSessions: () => VoiceSession[];
+  getSession: (room: string) => VoiceSession | undefined;
+  stopAll: () => Promise<void>;
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -110,6 +127,34 @@ describe("registerStimmVoiceCli", () => {
     await prog.commands["voice:start"].action!({ channel: "web" });
     expect(rm.createSession).toHaveBeenCalled();
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining("Voice session started"));
+  });
+
+  it("voice:start logs share URL flow when session has web access link", async () => {
+    const prog = fakeProgram();
+    const logger = { info: vi.fn(), error: vi.fn() };
+    const rm = fakeRoomManager() as unknown as RoomManager;
+    vi.mocked(rm.createSession).mockResolvedValueOnce(
+      fakeSession({
+        roomName: "share-room",
+        shareUrl: "https://example.trycloudflare.com/voice?claim=abc",
+        claimToken: "abc",
+      }),
+    );
+
+    registerStimmVoiceCli({
+      program: prog as any,
+      config: enabledConfig,
+      ensureRuntime: async () => ({ roomManager: rm }),
+      logger,
+    });
+
+    await prog.commands["voice:start"].action!({ channel: "web" });
+
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("Share URL: https://example.trycloudflare.com/voice?claim=abc"),
+    );
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining("Claim token: abc"));
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining("Scan this QR code"));
   });
 
   it("voice:start refuses when disabled", async () => {

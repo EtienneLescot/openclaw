@@ -134,20 +134,22 @@ export const WebConfigSchema = z.object({
   path: z.string().default("/voice"),
 });
 
-// ---------------------------------------------------------------------------
-// Tunnel — expose the gateway + LiveKit publicly via Tailscale Funnel.
-// ---------------------------------------------------------------------------
+export const ACCESS_MODES = ["none", "quick-tunnel"] as const;
+export type AccessMode = (typeof ACCESS_MODES)[number];
 
-export const TUNNEL_PROVIDERS = ["none", "tailscale-funnel"] as const;
-export type TunnelProvider = (typeof TUNNEL_PROVIDERS)[number];
-
-export const TunnelConfigSchema = z.object({
-  /** Tunnel provider. "none" = LAN-only, "tailscale-funnel" = public via Tailscale. */
-  provider: z.enum(TUNNEL_PROVIDERS).default("none"),
-  /** Tailscale Funnel port for the gateway (443, 8443, or 10000). */
-  gatewayFunnelPort: z.number().default(443),
-  /** Tailscale Funnel port for LiveKit signaling (443, 8443, or 10000). */
-  livekitFunnelPort: z.number().default(8443),
+export const AccessConfigSchema = z.object({
+  /** Public access mode for browser voice sessions. */
+  mode: z.enum(ACCESS_MODES).default("none"),
+  /** One-time claim token lifetime for `/voice/claim` exchange. */
+  claimTtlSeconds: z.number().int().positive().default(120),
+  /** LiveKit client token lifetime for browser join tokens. */
+  livekitTokenTtlSeconds: z.number().int().positive().default(300),
+  /** Optional shared secret for `POST /stimm/supervisor` hardening. */
+  supervisorSecret: z.string().optional(),
+  /** Allow direct `POST /voice` session creation (dev-only). */
+  allowDirectWebSessionCreate: z.boolean().default(false),
+  /** Claim exchange rate limit per IP per minute. */
+  claimRateLimitPerMinute: z.number().int().positive().default(20),
 });
 
 export const StimmVoiceConfigSchema = z.object({
@@ -155,7 +157,7 @@ export const StimmVoiceConfigSchema = z.object({
   livekit: LiveKitConfigSchema.default(() => LiveKitConfigSchema.parse({})),
   voiceAgent: VoiceAgentConfigSchema.default(() => VoiceAgentConfigSchema.parse({})),
   web: WebConfigSchema.default(() => WebConfigSchema.parse({})),
-  tunnel: TunnelConfigSchema.default(() => TunnelConfigSchema.parse({})),
+  access: AccessConfigSchema.default(() => AccessConfigSchema.parse({})),
 });
 
 export type StimmVoiceConfig = z.infer<typeof StimmVoiceConfigSchema>;
@@ -165,6 +167,7 @@ export type AgentSpawnConfig = z.infer<typeof AgentSpawnConfigSchema>;
 export type SttConfig = z.infer<typeof SttConfigSchema>;
 export type TtsConfig = z.infer<typeof TtsConfigSchema>;
 export type LlmConfig = z.infer<typeof LlmConfigSchema>;
+export type AccessConfig = z.infer<typeof AccessConfigSchema>;
 
 // ---------------------------------------------------------------------------
 // Provider → env-var name map. Used for API key fallback resolution.
@@ -225,6 +228,8 @@ export function resolveStimmVoiceConfig(raw: unknown): StimmVoiceConfig {
   if (config.livekit.apiSecret === "secret" && process.env.LIVEKIT_API_SECRET) {
     config.livekit.apiSecret = process.env.LIVEKIT_API_SECRET;
   }
+  config.access.supervisorSecret ??=
+    process.env.STIMM_SUPERVISOR_SECRET ?? process.env.OPENCLAW_SUPERVISOR_SECRET;
 
   return config;
 }

@@ -201,26 +201,41 @@
           }
         }
       },
-      "tunnel": {
+      "access": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Remote access via Tailscale Funnel.",
+        "description": "Public web access and claim-token security for voice sessions.",
         "properties": {
-          "provider": {
+          "mode": {
             "type": "string",
-            "enum": ["none", "tailscale-funnel"],
+            "enum": ["none", "quick-tunnel"],
             "default": "none",
-            "description": "Tunnel provider. 'none' = LAN-only, 'tailscale-funnel' = public via Tailscale."
+            "description": "Access mode. 'none' = no public tunnel, 'quick-tunnel' = Cloudflare Quick Tunnel started on demand."
           },
-          "gatewayFunnelPort": {
+          "claimTtlSeconds": {
             "type": "number",
-            "default": 443,
-            "description": "Tailscale Funnel port for the gateway (443, 8443, or 10000)."
+            "default": 120,
+            "description": "One-time claim token lifetime (seconds)."
           },
-          "livekitFunnelPort": {
+          "livekitTokenTtlSeconds": {
             "type": "number",
-            "default": 8443,
-            "description": "Tailscale Funnel port for LiveKit signaling (443, 8443, or 10000)."
+            "default": 300,
+            "description": "LiveKit token lifetime issued after claim exchange (seconds)."
+          },
+          "supervisorSecret": {
+            "type": "string",
+            "description": "Optional shared secret required by POST /stimm/supervisor.",
+            "sensitive": true
+          },
+          "allowDirectWebSessionCreate": {
+            "type": "boolean",
+            "default": false,
+            "description": "Allow direct POST /voice session creation without claim tokens (dev only)."
+          },
+          "claimRateLimitPerMinute": {
+            "type": "number",
+            "default": 20,
+            "description": "Maximum claim exchanges per IP per minute."
           }
         }
       }
@@ -325,19 +340,32 @@
       "label": "Web Voice Path",
       "advanced": true
     },
-    "tunnel.provider": {
-      "label": "Tunnel Provider",
-      "help": "'none' for LAN-only, 'tailscale-funnel' to expose publicly via Tailscale Funnel"
+    "access.mode": {
+      "label": "Access Mode",
+      "help": "'none' for local-only, 'quick-tunnel' to create a Cloudflare Quick Tunnel on session start"
     },
-    "tunnel.gatewayFunnelPort": {
-      "label": "Gateway Funnel Port",
-      "advanced": true,
-      "help": "Tailscale Funnel port for the gateway (443, 8443, or 10000)"
+    "access.claimTtlSeconds": {
+      "label": "Claim TTL (s)",
+      "advanced": true
     },
-    "tunnel.livekitFunnelPort": {
-      "label": "LiveKit Funnel Port",
+    "access.livekitTokenTtlSeconds": {
+      "label": "LiveKit Token TTL (s)",
+      "advanced": true
+    },
+    "access.supervisorSecret": {
+      "label": "Supervisor Secret",
+      "sensitive": true,
+      "help": "Shared secret required on POST /stimm/supervisor."
+    },
+    "access.allowDirectWebSessionCreate": {
+      "label": "Allow Direct /voice POST",
       "advanced": true,
-      "help": "Tailscale Funnel port for LiveKit signaling (443, 8443, or 10000)"
+      "help": "Enable only for local development."
+    },
+    "access.claimRateLimitPerMinute": {
+      "label": "Claim Rate Limit",
+      "advanced": true,
+      "help": "Maximum claim exchanges per IP per minute."
     }
   }
 }
