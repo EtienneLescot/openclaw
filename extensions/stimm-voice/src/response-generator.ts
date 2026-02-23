@@ -26,6 +26,10 @@ export type StimmResponseParams = {
 export type StimmResponseResult = {
   text: string | null;
   error?: string;
+  decision?: {
+    action: "NO_ACTION" | "TRIGGER";
+    reason?: string;
+  };
   debug?: {
     provider: string;
     model: string;
@@ -36,10 +40,36 @@ export type StimmResponseResult = {
   };
 };
 
+type SupervisorStructuredResponse = {
+  action: "NO_ACTION" | "TRIGGER";
+  text?: string;
+  reason?: string;
+};
+
 type SessionEntry = {
   sessionId: string;
   updatedAt: number;
 };
+
+function parseSupervisorStructuredResponse(raw: string): SupervisorStructuredResponse | null {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(trimmed) as Partial<SupervisorStructuredResponse>;
+    if (parsed.action !== "NO_ACTION" && parsed.action !== "TRIGGER") {
+      return null;
+    }
+    return {
+      action: parsed.action,
+      text: typeof parsed.text === "string" ? parsed.text : undefined,
+      reason: typeof parsed.reason === "string" ? parsed.reason : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Generate a response to a voice transcript using the OpenClaw agent pipeline.
@@ -126,6 +156,9 @@ export async function generateStimmResponse(
       `6. Respond in the SAME LANGUAGE the user is speaking.\n` +
       `7. Do NOT use sessions_send or any messaging tool — reply with plain text.\n` +
       `8. Never output NO_REPLY or HEARTBEAT_OK in this mode.\n` +
+      `9. Output MUST be a single JSON object with this schema only:\n` +
+      `   {"action":"NO_ACTION"|"TRIGGER","text":"<string when TRIGGER, else empty>","reason":"<short debug reason>"}\n` +
+      `   No markdown, no prose outside JSON.\n` +
       `CONTEXT: room=${roomName}, channel=${channel}.\n` +
       `Your text reply will be spoken aloud to the user via the voice agent.`;
 
@@ -165,8 +198,23 @@ export async function generateStimmResponse(
       .filter((p) => p.text && !p.isError)
       .map((p) => p.text?.trim())
       .filter(Boolean);
-
-    const reply = texts.join(" ") || null;
+    const rawReply = texts.join(" ").trim();
+    const structured = rawReply ? parseSupervisorStructuredResponse(rawReply) : null;
+    let reply: string | null;
+    let decision: StimmResponseResult["decision"] | undefined;
+    if (structured) {
+      decision = {
+        action: structured.action,
+        reason: structured.reason,
+      };
+      reply =
+        structured.action === "TRIGGER" && (structured.text ?? "").trim().length > 0
+          ? structured.text!.trim()
+          : null;
+    } else {
+      // Backward-compatible fallback for non-JSON replies.
+      reply = rawReply || null;
+    }
     const debug: NonNullable<StimmResponseResult["debug"]> = {
       provider,
       model,
@@ -177,10 +225,10 @@ export async function generateStimmResponse(
     };
 
     if (!reply && result.meta?.aborted) {
-      return { text: null, error: "Agent response was aborted", debug };
+      return { text: null, error: "Agent response was aborted", debug, decision };
     }
 
-    return { text: reply, debug };
+    return { text: reply, debug, decision };
   } catch (err) {
     return {
       text: null,
