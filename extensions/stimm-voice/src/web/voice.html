@@ -318,6 +318,7 @@
     let connected = false;
     let muted = false;
     const remoteAudioElements = new Map();
+    const remoteAudioByParticipant = new Map();
 
     const $ = (id) => document.getElementById(id);
     const statusDot = $("status-dot");
@@ -417,9 +418,27 @@
 
         room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, pub, participant) => {
           if (track.kind === LivekitClient.Track.Kind.Audio) {
+            const participantId = participant?.identity || "unknown";
             // Avoid duplicate playback when TrackSubscribed fires multiple times
             // for the same publication (mobile reconnects / renegotiation).
-            const key = pub?.trackSid || track.sid || `${participant?.identity || "unknown"}:${Date.now()}`;
+            const key =
+              pub?.trackSid ||
+              track.sid ||
+              `${participantId}:audio`;
+
+            // Hard guarantee: only one active audio element per participant.
+            // Some reconnection paths create multiple subscribed audio tracks
+            // before unsubscribing the previous one.
+            const previousKey = remoteAudioByParticipant.get(participantId);
+            if (previousKey && previousKey !== key) {
+              const previousEl = remoteAudioElements.get(previousKey);
+              if (previousEl) {
+                try {
+                  previousEl.remove();
+                } catch {}
+                remoteAudioElements.delete(previousKey);
+              }
+            }
             const prev = remoteAudioElements.get(key);
             if (prev) {
               try {
@@ -429,8 +448,10 @@
             }
             const el = track.attach();
             el.setAttribute("data-lk-track", key);
+            el.setAttribute("data-lk-participant", participantId);
             document.body.appendChild(el);
             remoteAudioElements.set(key, el);
+            remoteAudioByParticipant.set(participantId, key);
           }
         });
 
@@ -446,12 +467,20 @@
             el.remove();
           } catch {}
           remoteAudioElements.delete(key);
+          const participantId = el.getAttribute("data-lk-participant") || "";
+          if (participantId && remoteAudioByParticipant.get(participantId) === key) {
+            remoteAudioByParticipant.delete(participantId);
+          }
         });
 
         room.on(LivekitClient.RoomEvent.DataReceived, (payload, participant, kind) => {
           try {
             const msg = JSON.parse(new TextDecoder().decode(payload));
             if (msg.type === "transcript" || msg.type === "response") {
+              // Partial transcripts are high-frequency and may duplicate final text.
+              if (msg.type === "transcript" && msg.partial === true) {
+                return;
+              }
               addTranscript(
                 msg.type === "transcript" ? "user" : "agent",
                 msg.text || msg.data || "",
@@ -511,6 +540,7 @@
         } catch {}
       }
       remoteAudioElements.clear();
+      remoteAudioByParticipant.clear();
       onDisconnected();
       setStatus("disconnected", "Disconnected");
     }

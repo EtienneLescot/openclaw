@@ -47,11 +47,9 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import timedelta
 
 import aiohttp
-from livekit import api as lkapi
-from livekit.agents import AgentSession, JobContext, RoomInputOptions, WorkerOptions, cli
+from livekit.agents import WorkerOptions, cli
 
 from stimm import ConversationSupervisor
 
@@ -182,107 +180,22 @@ def _supervisor_factory(room_name: str, channel: str) -> OpenClawSupervisor:
 async def entrypoint(ctx):  # type: ignore[no-untyped-def]
     _patch_unknown_mic_source_fallback()
 
-    # Local copy of stimm.worker entrypoint with one OpenClaw-specific tweak:
-    # fix remote participant binding to the web client identity ("user").
-    from livekit.rtc import IceTransportType, RtcConfiguration
-
-    await ctx.connect(
-        rtc_config=RtcConfiguration(
-            ice_transport_type=IceTransportType.TRANSPORT_ALL,
-        )
-    )
-
-    from stimm.worker import make_agent
-
-    agent = make_agent()
-    session = AgentSession()
-
-    @session.on("user_input_transcribed")
-    def _on_transcript(ev) -> None:  # type: ignore[no-untyped-def]
-        import asyncio
-
-        asyncio.ensure_future(
-            agent.publish_transcript(ev.transcript, partial=not ev.is_final)
-        )
-
-    @session.on("conversation_item_added")
-    def _on_conversation_item(ev) -> None:  # type: ignore[no-untyped-def]
-        import asyncio
-
-        item = getattr(ev, "item", None)
-        role = getattr(item, "role", None)
-        if role != "assistant":
-            return
-        text = getattr(item, "text_content", None)
-        if isinstance(text, str) and text.strip():
-            asyncio.ensure_future(agent.publish_before_speak(text))
+    # Bind audio input to the web client participant identity ("user").
+    # STIMM_PARTICIPANT_IDENTITY can override for other topologies.
+    from livekit.agents import RoomInputOptions
+    from stimm.worker import make_entrypoint
 
     participant_identity = os.environ.get("STIMM_PARTICIPANT_IDENTITY", "user").strip()
-    room_input_options = (
-        RoomInputOptions(participant_identity=participant_identity)
-        if participant_identity
-        else RoomInputOptions()
-    )
-    logger.info(
-        "Room input participant binding: %s",
-        participant_identity or "<auto>",
-    )
+    room_input_options = RoomInputOptions(participant_identity=participant_identity)
+    logger.info("Room input participant binding: %s", participant_identity or "<auto>")
 
-    await session.start(
-        agent=agent,
-        room=ctx.room,
+    # Delegate entirely to stimm.make_entrypoint — dedup, handlers, supervisor
+    # token, and shutdown are all handled there.  OpenClaw only contributes the
+    # supervisor factory (HTTP POST to the gateway) and the SOURCE_UNKNOWN patch.
+    await make_entrypoint(
+        _supervisor_factory,
         room_input_options=room_input_options,
-    )
-
-    agent.protocol.bind(ctx.room)
-
-    channel = os.environ.get("OPENCLAW_CHANNEL", os.environ.get("STIMM_CHANNEL", "default"))
-    supervisor = _supervisor_factory(ctx.room.name, channel)
-
-    livekit_url = os.environ.get("LIVEKIT_URL", "ws://localhost:7880")
-    api_key = os.environ.get("LIVEKIT_API_KEY", "devkey")
-    api_secret = os.environ.get("LIVEKIT_API_SECRET", "secret")
-
-    sup_token = (
-        lkapi.AccessToken(api_key, api_secret)
-        .with_identity(f"stimm-supervisor-{ctx.room.name}")
-        .with_ttl(timedelta(seconds=3600))
-        .with_grants(
-            lkapi.VideoGrants(
-                room_join=True,
-                room=ctx.room.name,
-                can_publish=False,
-                can_subscribe=True,
-                can_publish_data=True,
-            )
-        )
-    )
-
-    try:
-        await supervisor.connect(livekit_url, sup_token.to_jwt())
-        supervisor.start_loop()
-        logger.info(
-            "Supervisor connected — room=%s channel=%s",
-            ctx.room.name,
-            channel,
-        )
-    except Exception as exc:
-        logger.error("Supervisor failed to connect (continuing without): %s", exc)
-
-    import asyncio
-
-    disconnect = asyncio.Event()
-
-    async def _on_shutdown() -> None:
-        supervisor.stop_loop()
-        try:
-            await supervisor.disconnect()
-        except Exception:
-            pass
-        disconnect.set()
-
-    ctx.add_shutdown_callback(_on_shutdown)
-    await disconnect.wait()
+    )(ctx)
 
 
 if __name__ == "__main__":
