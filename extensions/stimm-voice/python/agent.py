@@ -80,6 +80,7 @@ class OpenClawSupervisor(ConversationSupervisor):
             quiet_s=quiet_s,
             loop_interval_s=loop_interval_s,
             max_turns=max_turns,
+            backend_input_preamble=ConversationSupervisor.DEFAULT_AGNOSTIC_DECISION_PREAMBLE,
         )
         self.supervisor_url = supervisor_url
         self.room_name = room_name

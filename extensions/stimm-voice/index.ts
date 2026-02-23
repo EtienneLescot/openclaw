@@ -480,7 +480,8 @@ const stimmVoicePlugin = {
             api.logger.error(`[stimm-voice] Agent error: ${result.error}`);
           }
 
-          if (result.text && result.text.trim().length > 0) {
+          const isNoActionDecision = result.decision?.action === "NO_ACTION";
+          if (!isNoActionDecision && result.text && result.text.trim().length > 0) {
             api.logger.info(
               `[stimm-voice] Supervisor response (${body.roomName}, ${body.channel ?? "web"}):\n${result.text}`,
             );
