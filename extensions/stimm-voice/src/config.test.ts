@@ -16,6 +16,8 @@ const ENV_KEYS = [
   "LIVEKIT_URL",
   "LIVEKIT_API_KEY",
   "LIVEKIT_API_SECRET",
+  "STIMM_SUPERVISOR_SECRET",
+  "OPENCLAW_SUPERVISOR_SECRET",
 ] as const;
 
 describe("config", () => {
@@ -80,10 +82,13 @@ describe("config", () => {
       // Web
       expect(cfg.web.enabled).toBe(true);
       expect(cfg.web.path).toBe("/voice");
-      // Tunnel
-      expect(cfg.tunnel.provider).toBe("none");
-      expect(cfg.tunnel.gatewayFunnelPort).toBe(443);
-      expect(cfg.tunnel.livekitFunnelPort).toBe(8443);
+      // Access
+      expect(cfg.access.mode).toBe("none");
+      expect(cfg.access.claimTtlSeconds).toBe(120);
+      expect(cfg.access.livekitTokenTtlSeconds).toBe(300);
+      expect(cfg.access.supervisorSecret).toBeUndefined();
+      expect(cfg.access.allowDirectWebSessionCreate).toBe(false);
+      expect(cfg.access.claimRateLimitPerMinute).toBe(20);
     });
 
     it("accepts null/undefined/non-object input gracefully", () => {
@@ -239,6 +244,20 @@ describe("config", () => {
         const cfg = resolveStimmVoiceConfig({});
         expect(cfg.livekit.apiKey).toBe("cloud-key");
         expect(cfg.livekit.apiSecret).toBe("cloud-secret");
+      });
+    });
+
+    describe("access env-var fallbacks", () => {
+      it("falls back to STIMM_SUPERVISOR_SECRET", () => {
+        process.env.STIMM_SUPERVISOR_SECRET = "stimm-secret";
+        const cfg = resolveStimmVoiceConfig({});
+        expect(cfg.access.supervisorSecret).toBe("stimm-secret");
+      });
+
+      it("falls back to OPENCLAW_SUPERVISOR_SECRET", () => {
+        process.env.OPENCLAW_SUPERVISOR_SECRET = "openclaw-secret";
+        const cfg = resolveStimmVoiceConfig({});
+        expect(cfg.access.supervisorSecret).toBe("openclaw-secret");
       });
     });
 

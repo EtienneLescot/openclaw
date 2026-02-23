@@ -4,8 +4,32 @@
  * Exposes `openclaw voice [start|stop|status|setup]` commands.
  */
 
+import qrcode from "qrcode-terminal";
 import type { StimmVoiceConfig } from "./config.js";
-import type { RoomManager } from "./room-manager.js";
+
+type VoiceSession = {
+  roomName: string;
+  clientToken: string;
+  createdAt: number;
+  originChannel: string;
+  supervisor: { connected: boolean };
+  shareUrl?: string;
+  claimToken?: string;
+};
+
+type RoomManager = {
+  createSession: (opts: { roomName?: string; originChannel: string }) => Promise<VoiceSession>;
+  endSession: (room: string) => Promise<boolean>;
+  listSessions: () => VoiceSession[];
+};
+
+function renderQrAscii(data: string): Promise<string> {
+  return new Promise((resolve) => {
+    qrcode.generate(data, { small: true }, (output: string) => {
+      resolve(output.trimEnd());
+    });
+  });
+}
 
 interface VoiceCliDeps {
   program: {
@@ -48,8 +72,23 @@ export function registerStimmVoiceCli(deps: VoiceCliDeps): void {
       });
       logger.info(`Voice session started!`);
       logger.info(`  Room:  ${session.roomName}`);
-      logger.info(`  Token: ${session.clientToken}`);
-      logger.info(`  Use this token to connect from a LiveKit client.`);
+      if (session.shareUrl) {
+        logger.info(`  Share URL: ${session.shareUrl}`);
+        if (session.claimToken) {
+          logger.info(`  Claim token: ${session.claimToken}`);
+        }
+        const qr = await renderQrAscii(session.shareUrl);
+        logger.info("  Scan this QR code from your phone:");
+        logger.info("");
+        for (const line of qr.split("\n")) {
+          logger.info(`  ${line}`);
+        }
+        logger.info("");
+        logger.info(`  Open the Share URL on your phone to connect.`);
+      } else {
+        logger.info(`  Token: ${session.clientToken}`);
+        logger.info(`  Use this token to connect from a LiveKit client.`);
+      }
     });
 
   const stop = program.command("voice:stop");
@@ -99,31 +138,20 @@ export function registerStimmVoiceCli(deps: VoiceCliDeps): void {
 
   const doctor = program.command("voice:doctor");
   doctor.description("Check voice pipeline prerequisites").action(async () => {
-    const { getTailscaleStatus } = await import("./tunnel.js");
+    const { spawnSync } = await import("node:child_process");
 
-    // Check Tailscale.
-    const ts = await getTailscaleStatus();
-    if (ts.installed) {
-      if (ts.loggedIn) {
-        logger.info(`  ✅ Tailscale: logged in (${ts.dnsName})`);
+    if (config.access.mode === "quick-tunnel") {
+      const probe = spawnSync("cloudflared", ["--version"], { encoding: "utf8" });
+      if (probe.status === 0) {
+        logger.info("  ✅ cloudflared: installed");
       } else {
-        logger.info("  ⚠️  Tailscale: installed but not logged in — run `tailscale login`");
+        logger.info(
+          "  ❌ cloudflared: not installed — https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/",
+        );
       }
+      logger.info("  ℹ️  Access mode: quick-tunnel");
     } else {
-      logger.info("  ❌ Tailscale: not installed — https://tailscale.com/download");
-    }
-
-    // Check tunnel config.
-    if (config.tunnel.provider === "tailscale-funnel") {
-      if (ts.loggedIn && ts.dnsName) {
-        const gwPort =
-          config.tunnel.gatewayFunnelPort === 443 ? "" : `:${config.tunnel.gatewayFunnelPort}`;
-        logger.info(`  ✅ Tunnel: Tailscale Funnel → https://${ts.dnsName}${gwPort}/voice`);
-      } else {
-        logger.info("  ⚠️  Tunnel: configured but Tailscale not ready");
-      }
-    } else {
-      logger.info("  ℹ️  Tunnel: none (LAN-only) — run `openclaw voice:setup` to enable");
+      logger.info("  ℹ️  Access mode: none (no public tunnel)");
     }
 
     // Check LiveKit config.
