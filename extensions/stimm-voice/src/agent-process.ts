@@ -82,6 +82,10 @@ export class AgentProcess {
       LIVEKIT_URL: livekitUrl,
       LIVEKIT_API_KEY: livekitApiKey,
       LIVEKIT_API_SECRET: livekitApiSecret,
+      // Expose stimm.* / openclaw.* DEBUG logs in gateway output so
+      // transcript dedup, supervisor accept/drop, and generate_reply
+      // triggers are all visible for diagnostics.
+      LIVEKIT_LOG_LEVEL: "debug",
       ...env,
     };
 
@@ -90,6 +94,10 @@ export class AgentProcess {
     logger.info(`[stimm-voice] Starting Python voice agent (pid will follow)...`);
     logger.debug?.(`[stimm-voice] python=${pythonPath} script=${agentScript} cwd=${cwd}`);
 
+    // Kill any zombie Python process holding the livekit-agents HTTP port (8081)
+    // before spawning a new one, to avoid OSError: address already in use.
+    AgentProcess.freePort(8081, logger);
+
     this.proc = spawn(pythonPath, [agentScript, "dev"], {
       cwd,
       env: childEnv,
@@ -97,20 +105,37 @@ export class AgentProcess {
     });
 
     const pid = this.proc.pid;
-    logger.info(`[stimm-voice] Voice agent started (PID ${pid})`);
+    const logFile = "/tmp/stimm-agent.log";
+    logger.info(`[stimm-voice] Voice agent started (PID ${pid}) — Python logs also in ${logFile}`);
 
-    // Forward stdout/stderr through the plugin logger.
-    this.proc.stdout?.on("data", (chunk: Buffer) => {
-      for (const line of chunk.toString().split("\n").filter(Boolean)) {
-        logger.info(`[stimm-voice:agent] ${line}`);
-      }
-    });
+    // Write Python logs to a dedicated file for easy grep/tail access.
+    import("node:fs").then(({ createWriteStream }) => {
+      const logStream = createWriteStream(logFile, { flags: "a" });
+      logStream.write(`\n--- stimm-agent PID ${pid} started at ${new Date().toISOString()} ---\n`);
 
-    this.proc.stderr?.on("data", (chunk: Buffer) => {
-      for (const line of chunk.toString().split("\n").filter(Boolean)) {
-        // livekit-agents logs to stderr by default — forward as info.
+      const forwardLine = (line: string) => {
+        logStream.write(line + "\n");
         logger.info(`[stimm-voice:agent] ${line}`);
-      }
+      };
+
+      // Forward stdout/stderr through the plugin logger AND to the log file.
+      this.proc!.stdout?.on("data", (chunk: Buffer) => {
+        for (const line of chunk.toString().split("\n").filter(Boolean)) {
+          forwardLine(line);
+        }
+      });
+
+      this.proc!.stderr?.on("data", (chunk: Buffer) => {
+        for (const line of chunk.toString().split("\n").filter(Boolean)) {
+          // livekit-agents logs to stderr by default — forward as info.
+          forwardLine(line);
+        }
+      });
+
+      this.proc!.on("exit", () => {
+        logStream.write(`--- stimm-agent PID ${pid} exited at ${new Date().toISOString()} ---\n`);
+        logStream.end();
+      });
     });
 
     this.proc.on("exit", (code, signal) => {
@@ -245,6 +270,28 @@ export class AgentProcess {
         "Try manually: cd extensions/stimm-voice/python && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt",
       );
       return false;
+    }
+  }
+
+  /**
+   * Kill any process holding the given TCP port (Linux/macOS).
+   * Used to clean up zombie livekit-agents workers before restart.
+   */
+  static freePort(port: number, logger: { warn: (msg: string) => void }): void {
+    try {
+      const result = execSync(`fuser ${port}/tcp 2>/dev/null`, { encoding: "utf-8" }).trim();
+      if (result) {
+        for (const pid of result.trim().split(/\s+/).filter(Boolean)) {
+          try {
+            execSync(`kill -9 ${pid} 2>/dev/null`);
+            logger.warn(`[stimm-voice] Killed zombie process PID ${pid} holding port ${port}`);
+          } catch {
+            // Already gone.
+          }
+        }
+      }
+    } catch {
+      // fuser not available or port already free — ignore.
     }
   }
 
