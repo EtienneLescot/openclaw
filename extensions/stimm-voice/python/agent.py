@@ -48,10 +48,36 @@ from __future__ import annotations
 import logging
 import os
 
-import aiohttp
-from livekit.agents import WorkerOptions, cli
+# Write stimm.* / openclaw.* diagnostic logs directly to a file so they are
+# visible even when livekit-agents runs entrypoint() in a watchfiles subprocess
+# (whose stdout/stderr are not captured by the Node.js parent process).
+# The FileHandler is inherited by child processes (fork), so it works in both
+# the watcher process and the real worker subprocess.
+_log_level_name = os.environ.get("STIMM_LOG_LEVEL", "INFO").upper()
+_log_level = getattr(logging, _log_level_name, logging.INFO)
+_diag_log_file = os.environ.get("STIMM_DIAG_LOG", "/tmp/stimm-agent.log")
 
-from stimm import ConversationSupervisor
+_file_handler = logging.FileHandler(_diag_log_file, mode="a", encoding="utf-8")
+_file_handler.setLevel(_log_level)
+_file_handler.setFormatter(
+    logging.Formatter(
+        fmt="%(asctime)s %(levelname)-5s %(name)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
+)
+
+# Apply to stimm.* and openclaw.* — these are the loggers that emit
+# [TRANSCRIPT], [SUPERVISOR], [VOICE_AGENT] markers.
+for _pkg in ("stimm", "openclaw"):
+    _lg = logging.getLogger(_pkg)
+    _lg.setLevel(_log_level)
+    _lg.addHandler(_file_handler)
+    _lg.propagate = False  # don't double-print to root/livekit handlers
+
+import aiohttp  # noqa: E402
+from livekit.agents import WorkerOptions, cli  # noqa: E402
+
+from stimm import ConversationSupervisor  # noqa: E402
 
 logger = logging.getLogger("openclaw.voice")
 _UNKNOWN_SOURCE_PATCHED = False
