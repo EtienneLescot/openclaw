@@ -19,7 +19,7 @@ export type StimmResponseParams = {
   text: string;
   /** Optional model override (e.g. "anthropic/claude-sonnet-4-20250514"). */
   model?: string;
-  /** Optional extra system prompt appended to identity. */
+  /** Optional explicit system prompt override. By default, none is injected here. */
   extraSystemPrompt?: string;
 };
 
@@ -134,33 +134,11 @@ export async function generateStimmResponse(
 
   const thinkLevel = deps.resolveThinkingDefault({ cfg, provider, model });
 
-  // Build system prompt — incorporate agent identity.
-  const identity = deps.resolveAgentIdentity(cfg, agentId);
-  const agentName = identity?.name?.trim() || "assistant";
-
-  const basePrompt =
-    extraSystemPrompt ??
-    `You are ${agentName}, a helpful voice assistant working as a supervisor ` +
-      `in a dual-agent voice system. A small fast LLM handles the live conversation ` +
-      `with the user (greetings, acknowledgements, filler). You receive batches of ` +
-      `their conversation and decide whether to intervene.\n\n` +
-      `RULES:\n` +
-      `1. Return exactly [NO_ACTION] ONLY if the latest user message was already ` +
-      `answered correctly by the small LLM in the provided history.\n` +
-      `2. If the latest user message is a direct question and there is no clear/correct ` +
-      `assistant answer after it, you MUST answer now (do not return [NO_ACTION]).\n` +
-      `3. If the user asks a factual or technical question, provide the best concise answer now.\n` +
-      `4. If the user asks something that requires tools (search, calendar, etc.) ` +
-      `→ use your tools and respond with the result.\n` +
-      `5. NEVER repeat what the small LLM already said correctly.\n` +
-      `6. Respond in the SAME LANGUAGE the user is speaking.\n` +
-      `7. Do NOT use sessions_send or any messaging tool — reply with plain text.\n` +
-      `8. Never output NO_REPLY or HEARTBEAT_OK in this mode.\n` +
-      `9. Output MUST be a single JSON object with this schema only:\n` +
-      `   {"action":"NO_ACTION"|"TRIGGER","text":"<string when TRIGGER, else empty>","reason":"<short debug reason>"}\n` +
-      `   No markdown, no prose outside JSON.\n` +
-      `CONTEXT: room=${roomName}, channel=${channel}.\n` +
-      `Your text reply will be spoken aloud to the user via the voice agent.`;
+  // Keep OpenClaw-side prompt neutral; stimm owns the 3-way conversation policy.
+  const overridePrompt =
+    typeof extraSystemPrompt === "string" && extraSystemPrompt.trim()
+      ? extraSystemPrompt.trim()
+      : undefined;
 
   const timeoutMs = deps.resolveAgentTimeoutMs({ cfg });
   const runId = `stimm:${roomName}:${Date.now()}`;
@@ -181,7 +159,7 @@ export async function generateStimmResponse(
       timeoutMs,
       runId,
       lane: "voice",
-      extraSystemPrompt: basePrompt,
+      extraSystemPrompt: overridePrompt,
       agentDir,
     });
 
@@ -200,21 +178,15 @@ export async function generateStimmResponse(
       .filter(Boolean);
     const rawReply = texts.join(" ").trim();
     const structured = rawReply ? parseSupervisorStructuredResponse(rawReply) : null;
-    let reply: string | null;
     let decision: StimmResponseResult["decision"] | undefined;
     if (structured) {
       decision = {
         action: structured.action,
         reason: structured.reason,
       };
-      reply =
-        structured.action === "TRIGGER" && (structured.text ?? "").trim().length > 0
-          ? structured.text!.trim()
-          : null;
-    } else {
-      // Backward-compatible fallback for non-JSON replies.
-      reply = rawReply || null;
     }
+    // Forward raw backend text. Decision parsing/enforcement is handled in stimm.
+    const reply = rawReply || null;
     const debug: NonNullable<StimmResponseResult["debug"]> = {
       provider,
       model,
