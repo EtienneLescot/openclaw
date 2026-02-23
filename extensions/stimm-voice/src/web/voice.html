@@ -317,6 +317,7 @@
     let localTrack = null;
     let connected = false;
     let muted = false;
+    const remoteAudioElements = new Map();
 
     const $ = (id) => document.getElementById(id);
     const statusDot = $("status-dot");
@@ -332,17 +333,33 @@
     // API helpers
     // -----------------------------------------------------------------------
 
-    /** Ask the gateway to create a voice session and return the token. */
+    /** Resolve session credentials via claim exchange or direct session create (dev mode). */
     async function createSession() {
-      // POST to the same /voice path — the plugin handler returns a token.
       const voicePath = window.location.pathname.replace(/\/$/, "") || "/voice";
-      const res = await fetch(voicePath, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-      });
+      const claimPath = `${voicePath}/claim`;
+      const params = new URLSearchParams(window.location.search);
+      const claim = params.get("claim");
+
+      const res = claim
+        ? await fetch(claimPath, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ claim }),
+          })
+        : await fetch(voicePath, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+          });
+
       if (!res.ok) {
         const body = await res.text();
-        throw new Error(`Failed to create session: ${res.status} ${body}`);
+        if (claim) {
+          throw new Error(`Failed to exchange claim: ${res.status} ${body}`);
+        }
+        throw new Error(
+          `Failed to create session: ${res.status} ${body}. ` +
+            "Use a claim link, or enable direct web session create in config.",
+        );
       }
       return await res.json();
     }
@@ -400,9 +417,35 @@
 
         room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, pub, participant) => {
           if (track.kind === LivekitClient.Track.Kind.Audio) {
+            // Avoid duplicate playback when TrackSubscribed fires multiple times
+            // for the same publication (mobile reconnects / renegotiation).
+            const key = pub?.trackSid || track.sid || `${participant?.identity || "unknown"}:${Date.now()}`;
+            const prev = remoteAudioElements.get(key);
+            if (prev) {
+              try {
+                prev.remove();
+              } catch {}
+              remoteAudioElements.delete(key);
+            }
             const el = track.attach();
+            el.setAttribute("data-lk-track", key);
             document.body.appendChild(el);
+            remoteAudioElements.set(key, el);
           }
+        });
+
+        room.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track, pub) => {
+          const key = pub?.trackSid || track?.sid;
+          if (!key) return;
+          const el = remoteAudioElements.get(key);
+          if (!el) return;
+          try {
+            track?.detach(el);
+          } catch {}
+          try {
+            el.remove();
+          } catch {}
+          remoteAudioElements.delete(key);
         });
 
         room.on(LivekitClient.RoomEvent.DataReceived, (payload, participant, kind) => {
@@ -421,13 +464,20 @@
 
         await room.connect(livekitUrl, token);
 
-        // 4. Publish the local microphone.
+        // 4. Publish the local microphone and force SOURCE_MICROPHONE.
         localTrack = await LivekitClient.createLocalAudioTrack({
+          autoGainControl: true,
           echoCancellation: true,
           noiseSuppression: true,
-          autoGainControl: true,
         });
-        await room.localParticipant.publishTrack(localTrack);
+        const micSource =
+          LivekitClient?.Track?.Source?.Microphone ??
+          LivekitClient?.Track?.Source?.SOURCE_MICROPHONE;
+        const publishOpts = micSource ? { source: micSource } : undefined;
+        await room.localParticipant.publishTrack(localTrack, publishOpts);
+        if (localTrack.muted) {
+          localTrack.unmute();
+        }
 
         connected = true;
         muted = false;
@@ -455,6 +505,12 @@
         localTrack.stop();
         localTrack = null;
       }
+      for (const el of remoteAudioElements.values()) {
+        try {
+          el.remove();
+        } catch {}
+      }
+      remoteAudioElements.clear();
       onDisconnected();
       setStatus("disconnected", "Disconnected");
     }
