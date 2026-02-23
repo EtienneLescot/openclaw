@@ -460,6 +460,12 @@ const stimmVoicePlugin = {
                 `payloads=${result.debug.payloadCount} nonErrorTexts=${result.debug.nonErrorTextCount} ` +
                 `aborted=${result.debug.aborted}`,
             );
+            if (result.decision) {
+              api.logger.info(
+                `[stimm-voice] Supervisor decision (${body.roomName}, ${body.channel ?? "web"}): ` +
+                  `action=${result.decision.action} reason=${result.decision.reason ?? "n/a"}`,
+              );
+            }
             if (result.debug.payloadPreview.length > 0) {
               api.logger.info(
                 `[stimm-voice] Supervisor payload preview (${body.roomName}, ${body.channel ?? "web"}):\n` +
