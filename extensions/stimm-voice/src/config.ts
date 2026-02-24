@@ -82,7 +82,7 @@ export const TtsConfigSchema = z.object({
   provider: z.enum(TTS_PROVIDERS).default("openai"),
   /** Model name (e.g. "gpt-4o-mini-tts", "eleven_turbo_v2_5", "sonic-2"). */
   model: z.string().default("gpt-4o-mini-tts"),
-  /** Voice name or ID. Provider-dependent (e.g. "ash", "rachel"). */
+  /** Voice selector. OpenAI: name (e.g. "ash"); ElevenLabs: voice_id; Cartesia: voice UUID. */
   voice: z.string().default("ash"),
   /** Language code (e.g. "en", "fr"). Provider-dependent (useful for Cartesia, Google, etc.). */
   language: z.string().optional(),
