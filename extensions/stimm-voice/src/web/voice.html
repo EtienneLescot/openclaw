@@ -193,6 +193,62 @@
       flex-wrap: wrap;
     }
 
+    .connect-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: rgba(8, 8, 28, 0.74);
+      backdrop-filter: blur(8px);
+    }
+
+    .connect-overlay.hidden {
+      display: none;
+    }
+
+    .btn-connect-overlay {
+      width: min(680px, 100%);
+      min-height: 58vh;
+      border-radius: 24px;
+      border: 1px solid rgba(180, 214, 255, 0.62);
+      background: linear-gradient(160deg, rgba(114, 226, 255, 0.22), rgba(95, 131, 255, 0.34));
+      box-shadow: var(--shadow);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      padding: 26px;
+      text-align: center;
+    }
+
+    .btn-connect-overlay-icon {
+      width: 88px;
+      height: 88px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: rgba(12, 16, 40, 0.45);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 44px;
+      line-height: 1;
+    }
+
+    .btn-connect-overlay-title {
+      font-size: clamp(28px, 4.8vw, 52px);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+    }
+
+    .btn-connect-overlay-subtitle {
+      font-size: clamp(15px, 2.2vw, 20px);
+      color: var(--muted);
+    }
+
     button,
     select {
       border: 1px solid var(--border);
@@ -233,11 +289,34 @@
 
     button.hangup {
       display: none;
-      min-width: 170px;
-      padding: 12px 18px;
+      min-width: 240px;
+      padding: 14px 20px;
       border-color: rgba(255, 128, 164, 0.72);
       background: linear-gradient(170deg, rgba(255, 118, 156, 0.56), rgba(170, 41, 78, 0.6));
       color: #fff;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+    }
+
+    .hangup-icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 999px;
+      background: rgba(18, 10, 24, 0.34);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+    }
+
+    .hangup-icon svg {
+      width: 16px;
+      height: 16px;
+      fill: currentColor;
     }
 
     .error {
@@ -415,7 +494,15 @@
 
           <div class="action-row">
             <button class="primary" id="btn-connect">Connect</button>
-            <button class="hangup" id="btn-hangup">Raccrocher</button>
+            <button class="hangup" id="btn-hangup" aria-label="Raccrocher">
+              <span class="hangup-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" role="presentation" focusable="false">
+                  <path
+                    d="M4.4 15.2c2.5 3.8 5.8 6.1 9.8 6.9.6.1 1.2-.1 1.6-.5l2.2-2.2c.4-.4.5-1 .3-1.5l-1-2.9c-.2-.6-.8-.9-1.4-.8l-2.8.5c-1.8-.8-3.2-2.2-4-4l.5-2.8c.1-.6-.2-1.2-.8-1.4l-2.9-1c-.5-.2-1.1-.1-1.5.3L2.1 7.9c-.4.4-.6 1-.5 1.6.8 4 3.1 7.3 6.9 9.8Z" />
+                </svg>
+              </span>
+              <span>Raccrocher</span>
+            </button>
             <button id="btn-mute" disabled>Mute</button>
             <button id="btn-fullscreen">Fullscreen</button>
             <button id="btn-mode" class="mobile-only">Mode: Hands-free</button>
@@ -456,6 +543,14 @@
         <div class="transcript" id="transcript"></div>
       </section>
     </aside>
+  </div>
+
+  <div class="connect-overlay" id="connect-overlay">
+    <button class="btn-connect-overlay" id="btn-connect-overlay" aria-label="Activer l'audio et se connecter">
+      <span class="btn-connect-overlay-icon" aria-hidden="true">🎙️</span>
+      <span class="btn-connect-overlay-title">Appuyer pour parler</span>
+      <span class="btn-connect-overlay-subtitle">Active l'audio et connecte la session</span>
+    </button>
   </div>
 
   <div id="goodbye-screen" style="
@@ -504,8 +599,10 @@
     const transcriptEl = $("transcript");
     const errorMsg = $("error-msg");
     const layout = document.querySelector(".layout");
+    const connectOverlay = $("connect-overlay");
     const goodbyeScreen = $("goodbye-screen");
     const btnConnect = $("btn-connect");
+    const btnConnectOverlay = $("btn-connect-overlay");
     const btnHangup = $("btn-hangup");
     const btnMute = $("btn-mute");
     const btnFullscreen = $("btn-fullscreen");
@@ -571,6 +668,7 @@
     }
 
     function showGoodbyeScreen() {
+      setConnectOverlayVisible(false);
       if (layout) layout.style.display = "none";
       if (goodbyeScreen) goodbyeScreen.style.display = "flex";
     }
@@ -578,6 +676,11 @@
     function hideGoodbyeScreen() {
       if (goodbyeScreen) goodbyeScreen.style.display = "none";
       if (layout) layout.style.display = "grid";
+    }
+
+    function setConnectOverlayVisible(visible) {
+      if (!connectOverlay) return;
+      connectOverlay.classList.toggle("hidden", !visible);
     }
 
     function setInfoVisible(visible) {
@@ -767,11 +870,20 @@
       }
     }
 
-    async function connect() {
+    async function warmupAudioPermission() {
+      if (!navigator.mediaDevices?.getUserMedia) return;
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      for (const track of stream.getTracks()) {
+        track.stop();
+      }
+    }
+
+    async function connect(fromUserGesture = false) {
       if (connected) return;
       updateStatus("connecting", "Connecting…");
       hideError();
       btnConnect.disabled = true;
+      if (btnConnectOverlay) btnConnectOverlay.disabled = true;
 
       try {
         const session = await createSession();
@@ -870,7 +982,7 @@
         });
 
         await room.connect(livekitUrl, token);
-        await ensureAudioPlayback();
+        await ensureAudioPlayback(fromUserGesture);
         await listDevices();
         await replaceLocalTrack();
         if (localTrack?.muted) {
@@ -879,6 +991,7 @@
 
         connected = true;
         muted = false;
+        setConnectOverlayVisible(false);
         btnConnect.style.display = "none";
         btnConnect.disabled = false;
         btnHangup.style.display = "inline-flex";
@@ -897,6 +1010,7 @@
         updateStatus("error", "Connection failed");
       } finally {
         btnConnect.disabled = false;
+        if (btnConnectOverlay) btnConnectOverlay.disabled = false;
       }
     }
 
@@ -945,6 +1059,7 @@
       btnConnect.style.display = "inline-flex";
       btnConnect.classList.add("primary");
       btnConnect.classList.remove("danger");
+      setConnectOverlayVisible(true);
       btnHangup.style.display = "none";
       btnMute.textContent = "Mute";
       btnMute.disabled = true;
@@ -1045,10 +1160,28 @@
         });
       }
 
-      btnConnect.addEventListener("click", async () => {
+      const handleManualConnect = async () => {
         hideGoodbyeScreen();
-        await connect();
-      });
+        hideError();
+        setConnectOverlayVisible(false);
+        try {
+          await warmupAudioPermission();
+        } catch {
+          showError("Microphone access is required to start voice.");
+          setConnectOverlayVisible(true);
+          updateStatus("error", "Microphone permission required");
+          return;
+        }
+        await connect(true);
+        if (!connected) {
+          setConnectOverlayVisible(true);
+        }
+      };
+
+      btnConnect.addEventListener("click", handleManualConnect);
+      if (btnConnectOverlay) {
+        btnConnectOverlay.addEventListener("click", handleManualConnect);
+      }
       btnHangup.addEventListener("click", async () => {
         await disconnect();
       });
@@ -1070,17 +1203,9 @@
       await setAudioMode(isMobile ? "handsfree" : "standard");
       setupProximity();
       setInfoVisible(false);
-
-      const params = new URLSearchParams(window.location.search);
-      const fromClaimOrQr = Boolean(
-        params.get("c") || params.get("claim") || params.get("qr") || params.get("autoconnect") === "1",
-      );
-      if (fromClaimOrQr) {
-        await connect();
-      } else {
-        updateStatus("disconnected", "Ready");
-        statusPill.textContent = "Ready to connect";
-      }
+      setConnectOverlayVisible(true);
+      updateStatus("disconnected", "Ready");
+      statusPill.textContent = "Ready to connect";
     }
 
     init().catch((error) => {
