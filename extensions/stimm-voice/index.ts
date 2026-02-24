@@ -9,6 +9,7 @@
 import { createHmac, randomBytes, timingSafeEqual, webcrypto } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { deflateRawSync, inflateRawSync } from "node:zlib";
 import { Type } from "@sinclair/typebox";
 import {
   AccessToken,
@@ -71,9 +72,10 @@ type ClaimRecord = {
   claimId: string;
   roomName: string;
   channel: string;
-  clientToken: string;
   livekitUrl?: string;
   expiresAt: number;
+  disconnectToken?: string;
+  disconnectExpiresAt?: number;
   usedAt?: number;
 };
 
@@ -87,6 +89,7 @@ type SessionPayload = {
   clientToken: string;
   channel: string;
   createdAt: number;
+  disconnectToken?: string;
   livekitUrl?: string;
   claimToken?: string;
   shareUrl?: string;
@@ -252,24 +255,34 @@ const stimmVoicePlugin = {
       agentProcess.start();
     };
 
-    const createClaim = (params: { roomName: string; channel: string }): string => {
+    const createClaim = (params: {
+      roomName: string;
+      channel: string;
+    }): {
+      token: string;
+      record: ClaimRecord;
+    } => {
       const now = Date.now();
-      const session = lkRuntime?.getSession(params.roomName);
-      if (!session) {
-        throw new Error("session not found");
-      }
       const claim: ClaimRecord = {
-        claimId: randomBytes(16).toString("hex"),
+        claimId: randomHex(6),
         roomName: params.roomName,
         channel: params.channel,
-        clientToken: session.clientToken,
         livekitUrl: tunnelInfo?.livekitUrl ?? config.livekit.url,
         expiresAt: now + config.access.claimTtlSeconds * 1000,
       };
       claimStore.set(claim.claimId, claim);
-      const payloadB64 = Buffer.from(JSON.stringify(claim), "utf8").toString("base64url");
+      const compactPayload = {
+        v: 2,
+        i: claim.claimId,
+        r: claim.roomName,
+        e: claim.expiresAt,
+        ...(claim.channel !== "web" ? { c: claim.channel } : {}),
+      };
+      const payloadB64 = deflateRawSync(
+        Buffer.from(JSON.stringify(compactPayload), "utf8"),
+      ).toString("base64url");
       const signature = signClaim(payloadB64, claimSecret);
-      return `${payloadB64}.${signature}`;
+      return { token: `${payloadB64}.${signature}`, record: claim };
     };
 
     const verifyAndConsumeClaim = (token: string): ClaimRecord | null => {
@@ -278,15 +291,75 @@ const stimmVoicePlugin = {
       if (!verifyClaimSignature(payloadB64, signature, claimSecret)) return null;
       let parsed: ClaimRecord;
       try {
-        parsed = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8")) as ClaimRecord;
+        const raw = JSON.parse(
+          inflateRawSync(Buffer.from(payloadB64, "base64url")).toString("utf8"),
+        ) as
+          | {
+              claimId?: string;
+              roomName?: string;
+              channel?: string;
+              livekitUrl?: string;
+              expiresAt?: number;
+              disconnectToken?: string;
+              disconnectExpiresAt?: number;
+            }
+          | { v?: number; i?: string; r?: string; c?: string; e?: number; l?: string };
+        if (
+          typeof raw === "object" &&
+          raw !== null &&
+          "i" in raw &&
+          typeof raw.i === "string" &&
+          typeof raw.r === "string" &&
+          typeof raw.e === "number"
+        ) {
+          parsed = {
+            claimId: raw.i,
+            roomName: raw.r,
+            channel: typeof raw.c === "string" ? raw.c : "web",
+            livekitUrl: typeof raw.l === "string" ? raw.l : undefined,
+            expiresAt: raw.e,
+          };
+        } else {
+          parsed = raw as ClaimRecord;
+        }
       } catch {
-        return null;
+        // Backward compatibility: uncompressed payload format.
+        try {
+          const raw = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8")) as
+            | {
+                claimId?: string;
+                roomName?: string;
+                channel?: string;
+                livekitUrl?: string;
+                expiresAt?: number;
+              }
+            | { v?: number; i?: string; r?: string; c?: string; e?: number; l?: string };
+          if (
+            typeof raw === "object" &&
+            raw !== null &&
+            "i" in raw &&
+            typeof raw.i === "string" &&
+            typeof raw.r === "string" &&
+            typeof raw.e === "number"
+          ) {
+            parsed = {
+              claimId: raw.i,
+              roomName: raw.r,
+              channel: typeof raw.c === "string" ? raw.c : "web",
+              livekitUrl: typeof raw.l === "string" ? raw.l : undefined,
+              expiresAt: raw.e,
+            };
+          } else {
+            parsed = raw as ClaimRecord;
+          }
+        } catch {
+          return null;
+        }
       }
       if (
         typeof parsed.claimId !== "string" ||
         typeof parsed.roomName !== "string" ||
         typeof parsed.channel !== "string" ||
-        typeof parsed.clientToken !== "string" ||
         typeof parsed.expiresAt !== "number"
       ) {
         return null;
@@ -315,8 +388,28 @@ const stimmVoicePlugin = {
       }
 
       // Stateless fallback: allow signed, unexpired claims created by another process.
+      parsed.usedAt = now;
+      claimStore.set(parsed.claimId, parsed);
       consumedClaims.set(parsed.claimId, parsed.expiresAt);
       return parsed;
+    };
+
+    const resolveDisconnectClaim = (
+      roomName: string,
+      disconnectToken: string,
+    ): ClaimRecord | null => {
+      const now = Date.now();
+      for (const claim of claimStore.values()) {
+        if (
+          claim.roomName === roomName &&
+          claim.disconnectToken === disconnectToken &&
+          typeof claim.disconnectExpiresAt === "number" &&
+          claim.disconnectExpiresAt >= now
+        ) {
+          return claim;
+        }
+      }
+      return null;
     };
 
     const enforceClaimRateLimit = (ip: string): boolean => {
@@ -331,6 +424,40 @@ const stimmVoicePlugin = {
       recent.push(now);
       claimRateByIp.set(ip, recent);
       return true;
+    };
+
+    const isVoiceStartProcess = (): boolean => {
+      if (process.title === "openclaw-voice:start") return true;
+      return process.argv.some((arg) => arg.includes("voice:start"));
+    };
+
+    const maybeShutdownVoiceStartProcess = async (reason: string): Promise<void> => {
+      if (!isVoiceStartProcess()) return;
+      if (lkRuntime && lkRuntime.listSessions().length > 0) return;
+
+      api.logger.info(
+        `[stimm-voice] Last voice session ended (${reason}) — stopping voice:start process.`,
+      );
+
+      if (quickTunnel) {
+        quickTunnel.stop();
+        quickTunnel = null;
+      }
+      tunnelInfo = null;
+
+      if (agentProcess) {
+        agentProcess.stop();
+        agentProcess = null;
+      }
+
+      if (lkRuntime) {
+        await lkRuntime.stopAll();
+        lkRuntime = null;
+      }
+
+      setTimeout(() => {
+        process.exit(0);
+      }, 60);
     };
 
     const createSessionWithAccess = async (params: {
@@ -350,6 +477,7 @@ const stimmVoicePlugin = {
       }
 
       const payload = sessionPayload(session, tunnelInfo);
+      const now = Date.now();
       if (tunnelInfo?.gatewayUrl) {
         const claim = createClaim({
           roomName: session.roomName,
@@ -357,11 +485,26 @@ const stimmVoicePlugin = {
         });
         return {
           ...payload,
-          claimToken: claim,
-          shareUrl: `${tunnelInfo.gatewayUrl}?claim=${encodeURIComponent(claim)}&v=${Date.now()}`,
+          claimToken: claim.token,
+          shareUrl: `${tunnelInfo.gatewayUrl}?c=${claim.token}`,
         };
       }
-      return payload;
+
+      const disconnectRecord: ClaimRecord = {
+        claimId: randomBytes(16).toString("hex"),
+        roomName: session.roomName,
+        channel: params.channel,
+        disconnectToken: randomBytes(24).toString("hex"),
+        livekitUrl: tunnelInfo?.livekitUrl ?? config.livekit.url,
+        expiresAt: now + config.access.claimTtlSeconds * 1000,
+        disconnectExpiresAt: now + config.access.livekitTokenTtlSeconds * 1000,
+        usedAt: now,
+      };
+      claimStore.set(disconnectRecord.claimId, disconnectRecord);
+      return {
+        ...payload,
+        disconnectToken: disconnectRecord.disconnectToken,
+      };
     };
 
     // -- Gateway methods ----------------------------------------------------
@@ -808,10 +951,12 @@ const stimmVoicePlugin = {
               // User disconnected — tear down the room immediately.
               api.logger.info(`[stimm-voice] User left room "${roomName}" — ending session.`);
               await lkRuntime.endSession(roomName);
+              await maybeShutdownVoiceStartProcess("webhook participant_left");
             } else if (event.event === "room_finished") {
               // All participants gone (Python agent also done) — clean up map.
               api.logger.info(`[stimm-voice] Room "${roomName}" finished — cleaning up session.`);
               await lkRuntime.endSession(roomName);
+              await maybeShutdownVoiceStartProcess("webhook room_finished");
             }
           }
 
@@ -832,6 +977,7 @@ const stimmVoicePlugin = {
 
     if (config.web.enabled) {
       const claimPath = `${config.web.path.replace(/\/+$/, "")}/claim`;
+      const endPath = `${config.web.path.replace(/\/+$/, "")}/end`;
 
       api.registerHttpRoute({
         path: claimPath,
@@ -858,15 +1004,78 @@ const stimmVoicePlugin = {
               res.end(JSON.stringify({ error: "invalid_or_expired_claim" }));
               return;
             }
+
+            const rt = await ensureRuntime();
+            const clientToken = await rt.lk.issueJoinToken(record.roomName, {
+              identity: "user",
+              ttlSeconds: config.access.livekitTokenTtlSeconds,
+            });
+
+            const now = Date.now();
+            const disconnectToken = randomBytes(24).toString("hex");
+            const disconnectExpiresAt = now + config.access.livekitTokenTtlSeconds * 1000;
+            claimStore.set(record.claimId, {
+              ...record,
+              disconnectToken,
+              disconnectExpiresAt,
+              usedAt: now,
+            });
+
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(
               JSON.stringify({
                 room: record.roomName,
-                clientToken: record.clientToken,
+                clientToken,
                 channel: record.channel,
-                ...(record.livekitUrl ? { livekitUrl: record.livekitUrl } : {}),
+                disconnectToken,
+                livekitUrl: record.livekitUrl ?? config.livekit.url,
               }),
             );
+          } catch (err) {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+          }
+        },
+      });
+
+      api.registerHttpRoute({
+        path: endPath,
+        handler: async (req, res) => {
+          if (req.method !== "POST") {
+            res.writeHead(405);
+            res.end();
+            return;
+          }
+          try {
+            const chunks: Buffer[] = [];
+            for await (const chunk of req) chunks.push(chunk as Buffer);
+            const body = JSON.parse(Buffer.concat(chunks).toString()) as {
+              room?: string;
+              disconnectToken?: string;
+            };
+            const room = typeof body.room === "string" ? body.room.trim() : "";
+            const disconnectToken =
+              typeof body.disconnectToken === "string" ? body.disconnectToken.trim() : "";
+            if (!room || !disconnectToken) {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: "room and disconnectToken required" }));
+              return;
+            }
+
+            const claim = resolveDisconnectClaim(room, disconnectToken);
+            if (!claim) {
+              res.writeHead(401, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: "invalid_or_expired_disconnect_token" }));
+              return;
+            }
+
+            const rt = await ensureRuntime();
+            const ended = await rt.lk.endSession(room);
+            claimStore.delete(claim.claimId);
+
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ended: true, room, deletedRoom: ended }));
+            await maybeShutdownVoiceStartProcess("web end route");
           } catch (err) {
             res.writeHead(500, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
@@ -1007,6 +1216,23 @@ class LiveKitRuntime {
     return [...this.sessions.values()];
   }
 
+  async issueJoinToken(
+    roomName: string,
+    opts: {
+      ttlSeconds?: number;
+      identity?: string;
+    } = {},
+  ): Promise<string> {
+    return await this.generateToken({
+      identity: opts.identity ?? "user",
+      roomName,
+      canPublish: true,
+      canSubscribe: true,
+      canPublishData: true,
+      ttlSeconds: opts.ttlSeconds,
+    });
+  }
+
   async issueClientToken(
     roomName: string,
     opts: {
@@ -1017,14 +1243,7 @@ class LiveKitRuntime {
     if (!this.sessions.has(roomName)) {
       throw new Error("session not found");
     }
-    return await this.generateToken({
-      identity: opts.identity ?? "user",
-      roomName,
-      canPublish: true,
-      canSubscribe: true,
-      canPublishData: true,
-      ttlSeconds: opts.ttlSeconds,
-    });
+    return await this.issueJoinToken(roomName, opts);
   }
 
   async stopAll(): Promise<void> {

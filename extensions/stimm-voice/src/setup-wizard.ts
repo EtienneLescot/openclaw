@@ -507,6 +507,7 @@ async function fetchProviderModels(
 type ProviderCatalog = {
   models: string[];
   voices: string[];
+  voiceChoices?: Array<{ value: string; label: string }>;
   languages: string[];
 };
 
@@ -524,6 +525,7 @@ async function fetchProviderCatalog(
   const key = apiKey.trim();
   const models = await fetchProviderModels(lane, entry, key);
   let voices: string[] = [];
+  let voiceChoices: Array<{ value: string; label: string }> = [];
   let languages: string[] = [];
 
   // Voices — provider APIs that expose a voice catalog.
@@ -533,11 +535,18 @@ async function fetchProviderCatalog(
       const json = (await fetchJson(api.voicesUrl, { headers: { [authKey]: key } })) as {
         voices?: Array<{ voice_id?: string; name?: string }>;
       };
-      // Return voice_id values (what worker.py expects) with name as label context.
-      voices = uniq((json.voices ?? []).flatMap((v) => [v.voice_id ?? "", v.name ?? ""]));
+      const list = (json.voices ?? []).flatMap((voice) => {
+        const id = (voice.voice_id ?? "").trim();
+        if (!id) return [];
+        const name = (voice.name ?? "").trim();
+        return [{ value: id, label: name ? `${name} (${id})` : id }];
+      });
+      voiceChoices = uniqByValue(list);
+      voices = voiceChoices.map((choice) => choice.value);
     }
   } catch {
     voices = [];
+    voiceChoices = [];
   }
 
   if (voices.length === 0 && lane === "tts") {
@@ -551,8 +560,23 @@ async function fetchProviderCatalog(
   return {
     models: uniq(models),
     voices: uniq(voices),
+    ...(voiceChoices.length > 0 ? { voiceChoices } : {}),
     languages: uniq(languages),
   };
+}
+
+function uniqByValue(values: Array<{ value: string; label: string }>): Array<{
+  value: string;
+  label: string;
+}> {
+  const seen = new Set<string>();
+  const output: Array<{ value: string; label: string }> = [];
+  for (const item of values) {
+    if (seen.has(item.value)) continue;
+    seen.add(item.value);
+    output.push(item);
+  }
+  return output;
 }
 
 async function promptModelWithChoices(params: {
@@ -604,6 +628,40 @@ async function promptTextOrChoice(params: {
       { value: "__custom__", label: customLabel ?? "Custom value…" },
     ],
     initialValue: values.includes(initialValue) ? initialValue : "__custom__",
+  })) as string | symbol;
+
+  if (isCancel(selection)) return selection;
+  if (selection === "__empty__") return "";
+  if (selection !== "__custom__") return selection;
+
+  return c.text({
+    message,
+    initialValue,
+    placeholder,
+  }) as Promise<string | symbol>;
+}
+
+async function promptMappedTextOrChoice(params: {
+  c: Clack;
+  message: string;
+  options: Array<{ value: string; label: string }>;
+  initialValue: string;
+  placeholder: string;
+  customLabel?: string;
+  allowEmpty?: boolean;
+}): Promise<string | symbol> {
+  const { c, message, options, initialValue, placeholder, customLabel, allowEmpty } = params;
+  const values = uniqByValue(options);
+  const selection = (await c.select({
+    message,
+    options: [
+      ...(allowEmpty ? [{ value: "__empty__", label: "Use provider default" }] : []),
+      ...values,
+      { value: "__custom__", label: customLabel ?? "Custom value…" },
+    ],
+    initialValue: values.some((option) => option.value === initialValue)
+      ? initialValue
+      : "__custom__",
   })) as string | symbol;
 
   if (isCancel(selection)) return selection;
@@ -907,17 +965,28 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
     if (isCancel(ttsModelResult)) return c.outro("Setup cancelled.");
     ttsModel = ttsModelResult;
 
-    const ttsVoiceResult = await promptTextOrChoice({
-      c,
-      message:
-        ttsProvider === "elevenlabs"
-          ? "Voice ID for ElevenLabs (voice_id)"
-          : `Voice name for ${ttsEntry.label}`,
-      options: ttsLiveCatalog.voices,
-      initialValue: existing.tts?.voice ?? ttsEntry.defaultVoice,
-      placeholder: ttsEntry.defaultVoice,
-      customLabel: "Custom voice…",
-    });
+    const ttsVoiceResult = ttsLiveCatalog.voiceChoices?.length
+      ? await promptMappedTextOrChoice({
+          c,
+          message: `Voice for ${ttsEntry.label}`,
+          options: ttsLiveCatalog.voiceChoices,
+          initialValue: existing.tts?.voice ?? ttsEntry.defaultVoice,
+          placeholder: ttsEntry.defaultVoice,
+          customLabel: "Custom voice ID…",
+        })
+      : await promptTextOrChoice({
+          c,
+          message:
+            ttsProvider === "elevenlabs"
+              ? "Voice ID for ElevenLabs (voice_id)"
+              : ttsProvider === "cartesia"
+                ? "Voice ID for Cartesia (UUID)"
+                : `Voice name for ${ttsEntry.label}`,
+          options: ttsLiveCatalog.voices,
+          initialValue: existing.tts?.voice ?? ttsEntry.defaultVoice,
+          placeholder: ttsEntry.defaultVoice,
+          customLabel: "Custom voice…",
+        });
     if (isCancel(ttsVoiceResult)) return c.outro("Setup cancelled.");
     ttsVoice = ttsVoiceResult;
 

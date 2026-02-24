@@ -77,6 +77,7 @@ Notes:
 
 - The extension is disabled by default (`enabled: false`).
 - `access.mode="quick-tunnel"` requires `cloudflared` on PATH.
+- `voiceAgent.tts.voice` is provider-specific: OpenAI uses voice names (`ash`, `alloy`), ElevenLabs uses `voice_id`, and Cartesia uses voice UUIDs.
 - API keys can be set directly in plugin config, or via env fallbacks (`STIMM_STT_API_KEY`, `STIMM_TTS_API_KEY`, `STIMM_LLM_API_KEY`, then provider-specific env vars).
 - `access.supervisorSecret` also supports env fallback (`STIMM_SUPERVISOR_SECRET`, then `OPENCLAW_SUPERVISOR_SECRET`).
 
