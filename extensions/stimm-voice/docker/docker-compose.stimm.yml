@@ -13,8 +13,8 @@ services:
     image: livekit/livekit-server:latest
     command: --dev --bind 0.0.0.0
     ports:
-      - "7880:7880"   # WebSocket + HTTP API
-      - "7881:7881"   # RTC (WebRTC)
+      - "7880:7880" # WebSocket + HTTP API
+      - "7881:7881" # RTC (WebRTC)
     environment:
       LIVEKIT_KEYS: "devkey: secret"
     restart: unless-stopped

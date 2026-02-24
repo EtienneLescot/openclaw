@@ -11,11 +11,13 @@
 Stimm is rewritten from scratch as a **dual-agent voice orchestration framework** built on top of [livekit-agents](https://github.com/livekit/agents).
 
 It is NOT:
+
 - A voice pipeline (livekit-agents does that)
 - A full application (that was stimm v1)
 - An alternative to livekit-agents (it extends it)
 
 It IS:
+
 - The **orchestration layer** for running two agents in one LiveKit room
 - A **VoiceAgent** that extends livekit Agent with instruction injection, modes, and pre-TTS buffering
 - A **Supervisor** base class for the background agent
@@ -245,7 +247,7 @@ class VoiceAgent(Agent):
         """Merge supervisor instructions into the voice agent's LLM prompt."""
         if not self._pending_instructions and not self._supervisor_context:
             return base_instructions
-        
+
         parts = [base_instructions]
         if self._supervisor_context:
             parts.append("\n\nContext from supervisor:\n" + "\n".join(self._supervisor_context))
@@ -257,6 +259,7 @@ class VoiceAgent(Agent):
 ```
 
 Key behaviors:
+
 - **Publishes transcripts** to data channel as STT produces them
 - **Publishes `before_speak`** before TTS, giving supervisor a chance to override
 - **Accepts instructions** from supervisor via data channel
@@ -275,18 +278,18 @@ from stimm.protocol import (
 class Supervisor:
     """
     Base class for the background supervising agent.
-    
+
     Joins a LiveKit room as a non-audio participant.
     Receives transcripts and voice agent state via data channel.
     Sends instructions back to the voice agent.
-    
+
     Subclass this and implement on_transcript(), on_state_change(), etc.
     """
-    
+
     def __init__(self, *, room: rtc.Room | None = None):
         self._room = room
         self._protocol = StimmProtocol()
-    
+
     async def connect(self, url: str, token: str):
         """Connect to the LiveKit room as a data-only participant."""
         if not self._room:
@@ -297,47 +300,47 @@ class Supervisor:
         self._protocol.on_state(self.on_state_change)
         self._protocol.on_before_speak(self.on_before_speak)
         self._protocol.on_metrics(self.on_metrics)
-    
+
     # --- Override these in your subclass ---
-    
+
     async def on_transcript(self, msg: TranscriptMessage):
         """Called when user speaks. Override to process transcripts."""
         pass
-    
+
     async def on_state_change(self, msg: StateMessage):
         """Called when voice agent changes state (listening/thinking/speaking)."""
         pass
-    
+
     async def on_before_speak(self, msg: BeforeSpeakMessage):
         """Called before voice agent speaks. Return an OverrideMessage to replace."""
         pass
-    
+
     async def on_metrics(self, msg: MetricsMessage):
         """Called with per-turn latency metrics."""
         pass
-    
+
     # --- Send commands to the voice agent ---
-    
+
     async def instruct(self, text: str, *, speak: bool = True, priority: str = "normal"):
         """Send an instruction to the voice agent."""
         await self._protocol.send_instruction(InstructionMessage(
             text=text, speak=speak, priority=priority,
         ))
-    
+
     async def add_context(self, text: str, *, append: bool = True):
         """Add context to the voice agent's working memory."""
         await self._protocol.send_context(ContextMessage(text=text, append=append))
-    
+
     async def send_action_result(self, action: str, status: str, summary: str):
         """Notify voice agent that a tool/action completed."""
         await self._protocol.send_action_result(ActionResultMessage(
             action=action, status=status, summary=summary,
         ))
-    
+
     async def set_mode(self, mode: str):
         """Switch voice agent mode (autonomous/relay/hybrid)."""
         await self._protocol.send_mode(mode)
-    
+
     async def disconnect(self):
         """Leave the room."""
         if self._room:
@@ -417,23 +420,23 @@ STIMM_TOPIC = "stimm"
 
 class StimmProtocol:
     """Handles serialization and data channel routing for stimm messages."""
-    
+
     def __init__(self):
         self._handlers: dict[str, list] = {}
         self._room: rtc.Room | None = None
-    
+
     def bind(self, room: rtc.Room):
         """Bind to a LiveKit room's data channel."""
         self._room = room
         room.on("data_received", self._on_data)
-    
+
     def _on_data(self, data: rtc.DataPacket):
         if data.topic != STIMM_TOPIC:
             return
         msg = self._deserialize(data.data)
         for handler in self._handlers.get(msg.type, []):
             handler(msg)
-    
+
     async def _send(self, msg: BaseModel):
         if self._room:
             await self._room.local_participant.publish_data(
@@ -441,7 +444,7 @@ class StimmProtocol:
                 topic=STIMM_TOPIC,
                 reliable=True,
             )
-    
+
     # Registration + sending helpers...
 ```
 
@@ -452,7 +455,7 @@ from livekit import api as lkapi
 
 class StimmRoom:
     """Manages a LiveKit room with a VoiceAgent + Supervisor pair."""
-    
+
     def __init__(
         self,
         *,
@@ -469,7 +472,7 @@ class StimmRoom:
         self._voice_agent = voice_agent
         self._supervisor = supervisor
         self._room_name = room_name or f"stimm-{uuid4().hex[:8]}"
-    
+
     async def start(self):
         """Create room, generate tokens, connect both agents."""
         # 1. Create LiveKit room
@@ -478,11 +481,11 @@ class StimmRoom:
         # 4. Start voice agent worker
         # 5. Connect supervisor
         ...
-    
+
     async def stop(self):
         """Disconnect both agents and close room."""
         ...
-    
+
     def get_client_token(self, identity: str = "user") -> str:
         """Generate a token for the end-user to join (browser, app, etc.)."""
         ...
@@ -500,50 +503,50 @@ BufferingLevel = Literal["NONE", "LOW", "MEDIUM", "HIGH"]
 class TextBufferingStrategy:
     """
     Controls how LLM tokens are batched before being sent to TTS.
-    
+
     - NONE: Send every token immediately (lowest latency, choppiest speech)
     - LOW: Buffer until word boundary (space)
     - MEDIUM: Buffer until 4+ words OR punctuation
     - HIGH: Buffer until sentence boundary (punctuation only)
     """
-    
+
     def __init__(self, level: BufferingLevel = "MEDIUM"):
         self.level = level
         self._buffer = ""
         self._punctuation = ".!?;:"
-    
+
     def feed(self, token: str) -> str | None:
         """
         Feed an LLM token. Returns text to send to TTS, or None if still buffering.
         """
         self._buffer += token
-        
+
         if self.level == "NONE":
             result = self._buffer
             self._buffer = ""
             return result
-        
+
         elif self.level == "LOW":
             if " " in self._buffer:
                 parts = self._buffer.rsplit(" ", 1)
                 self._buffer = parts[1] if len(parts) > 1 else ""
                 return parts[0] + " "
-        
+
         elif self.level == "MEDIUM":
             words = self._buffer.split()
             if len(words) >= 4 or any(c in self._buffer for c in self._punctuation):
                 result = self._buffer
                 self._buffer = ""
                 return result
-        
+
         elif self.level == "HIGH":
             if any(c in self._buffer for c in self._punctuation):
                 result = self._buffer
                 self._buffer = ""
                 return result
-        
+
         return None
-    
+
     def flush(self) -> str | None:
         """Flush remaining buffer (call at end of LLM stream)."""
         if self._buffer:
@@ -591,15 +594,15 @@ export interface InstructionMessage { ... }
 // Supervisor client for Node.js/TypeScript consumers
 export class StimmSupervisorClient {
   constructor(options: { livekitUrl: string; token: string });
-  
+
   async connect(): Promise<void>;
   async disconnect(): Promise<void>;
-  
+
   on(event: 'transcript', handler: (msg: TranscriptMessage) => void): void;
   on(event: 'state', handler: (msg: StateMessage) => void): void;
   on(event: 'before_speak', handler: (msg: BeforeSpeakMessage) => void): void;
   on(event: 'metrics', handler: (msg: MetricsMessage) => void): void;
-  
+
   async instruct(msg: Omit<InstructionMessage, 'type'>): Promise<void>;
   async addContext(msg: Omit<ContextMessage, 'type'>): Promise<void>;
   async sendActionResult(msg: Omit<ActionResultMessage, 'type'>): Promise<void>;
@@ -612,21 +615,21 @@ export class StimmSupervisorClient {
 
 ## 6. Migration from Stimm v1
 
-| v1 Component | v2 Equivalent |
-|-------------|---------------|
-| `StimmEventLoop` (722 LOC) | Deleted. livekit-agents `AgentSession` handles this. |
-| `SileroVADService` (250 LOC) | Deleted. `livekit-plugins-silero` handles this. |
-| `LiveKitAgentBridge` (614 LOC) | Deleted. livekit-agents `RoomIO` handles this. |
-| `STTService` + providers (270 LOC) | Deleted. `livekit-plugins-deepgram` etc. |
-| `TTSService` + providers (570 LOC) | Deleted. `livekit-plugins-*` etc. |
-| `LLMService` + providers (510 LOC) | Deleted. `livekit-plugins-*` etc. |
-| `SharedStreaming` (293 LOC) | Deleted. livekit-agents handles streaming. |
-| `WebRTCMediaHandler` (240 LOC) | Deleted. livekit-agents handles media. |
-| Pre-TTS buffering logic | **Kept** → `stimm.buffering` |
-| RAG engine | Deleted. Consumer's responsibility. |
-| Agent admin DB | Deleted. Consumer's responsibility. |
-| FastAPI routes | Deleted. |
-| Next.js frontend | Deleted. |
+| v1 Component                       | v2 Equivalent                                        |
+| ---------------------------------- | ---------------------------------------------------- |
+| `StimmEventLoop` (722 LOC)         | Deleted. livekit-agents `AgentSession` handles this. |
+| `SileroVADService` (250 LOC)       | Deleted. `livekit-plugins-silero` handles this.      |
+| `LiveKitAgentBridge` (614 LOC)     | Deleted. livekit-agents `RoomIO` handles this.       |
+| `STTService` + providers (270 LOC) | Deleted. `livekit-plugins-deepgram` etc.             |
+| `TTSService` + providers (570 LOC) | Deleted. `livekit-plugins-*` etc.                    |
+| `LLMService` + providers (510 LOC) | Deleted. `livekit-plugins-*` etc.                    |
+| `SharedStreaming` (293 LOC)        | Deleted. livekit-agents handles streaming.           |
+| `WebRTCMediaHandler` (240 LOC)     | Deleted. livekit-agents handles media.               |
+| Pre-TTS buffering logic            | **Kept** → `stimm.buffering`                         |
+| RAG engine                         | Deleted. Consumer's responsibility.                  |
+| Agent admin DB                     | Deleted. Consumer's responsibility.                  |
+| FastAPI routes                     | Deleted.                                             |
+| Next.js frontend                   | Deleted.                                             |
 
 **v1 total: ~7,000 LOC → v2 total: ~1,300 LOC Python + ~400 LOC TypeScript**
 
@@ -635,6 +638,7 @@ export class StimmSupervisorClient {
 ## 7. Development Plan
 
 ### Week 1: Core Library
+
 - [ ] Create branch `v2` from clean slate
 - [ ] `pyproject.toml` + project structure
 - [ ] `protocol.py` — message types + serialization + data channel binding
@@ -646,6 +650,7 @@ export class StimmSupervisorClient {
 - [ ] `docker-compose.yml` for local LiveKit server
 
 ### Week 2: TypeScript + Examples
+
 - [ ] `packages/protocol-ts/` — TypeScript message types
 - [ ] `StimmSupervisorClient` — TypeScript supervisor client
 - [ ] `examples/basic/` — minimal dual-agent demo
@@ -655,6 +660,7 @@ export class StimmSupervisorClient {
 - [ ] Publish `@stimm/protocol` to npm (test)
 
 ### Week 3: OpenClaw Integration
+
 - [ ] OpenClaw `extensions/stimm-voice/` scaffold
 - [ ] OpenClaw Supervisor in TypeScript
 - [ ] Web "Talk" button

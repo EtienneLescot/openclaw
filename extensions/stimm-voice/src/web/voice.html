@@ -1,607 +1,601 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Stimm Voice</title>
-  <style>
-    :root {
-      --bg: #0f0f13;
-      --surface: #1a1a24;
-      --border: #2a2a3a;
-      --text: #e8e8f0;
-      --muted: #8888a0;
-      --accent: #6c63ff;
-      --accent-hover: #7e76ff;
-      --green: #4caf50;
-      --red: #e53935;
-      --orange: #ff9800;
-      --radius: 12px;
-    }
-
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-    }
-
-    .container {
-      width: 100%;
-      max-width: 480px;
-      padding: 24px;
-    }
-
-    .header {
-      text-align: center;
-      margin-bottom: 32px;
-    }
-
-    .header h1 {
-      font-size: 24px;
-      font-weight: 600;
-      letter-spacing: -0.02em;
-    }
-
-    .header p {
-      color: var(--muted);
-      font-size: 14px;
-      margin-top: 6px;
-    }
-
-    .card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 24px;
-      margin-bottom: 16px;
-    }
-
-    .status-indicator {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      margin-bottom: 20px;
-    }
-
-    .status-dot {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      background: var(--muted);
-      flex-shrink: 0;
-    }
-
-    .status-dot.connected {
-      background: var(--green);
-      box-shadow: 0 0 8px var(--green);
-    }
-
-    .status-dot.connecting {
-      background: var(--orange);
-      animation: pulse 1.2s infinite;
-    }
-
-    .status-dot.error {
-      background: var(--red);
-    }
-
-    @keyframes pulse {
-
-      0%,
-      100% {
-        opacity: 1;
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Stimm Voice</title>
+    <style>
+      :root {
+        --bg: #0f0f13;
+        --surface: #1a1a24;
+        --border: #2a2a3a;
+        --text: #e8e8f0;
+        --muted: #8888a0;
+        --accent: #6c63ff;
+        --accent-hover: #7e76ff;
+        --green: #4caf50;
+        --red: #e53935;
+        --orange: #ff9800;
+        --radius: 12px;
       }
 
-      50% {
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .container {
+        width: 100%;
+        max-width: 480px;
+        padding: 24px;
+      }
+
+      .header {
+        text-align: center;
+        margin-bottom: 32px;
+      }
+
+      .header h1 {
+        font-size: 24px;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+      }
+
+      .header p {
+        color: var(--muted);
+        font-size: 14px;
+        margin-top: 6px;
+      }
+
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 24px;
+        margin-bottom: 16px;
+      }
+
+      .status-indicator {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 20px;
+      }
+
+      .status-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--muted);
+        flex-shrink: 0;
+      }
+
+      .status-dot.connected {
+        background: var(--green);
+        box-shadow: 0 0 8px var(--green);
+      }
+
+      .status-dot.connecting {
+        background: var(--orange);
+        animation: pulse 1.2s infinite;
+      }
+
+      .status-dot.error {
+        background: var(--red);
+      }
+
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+
+        50% {
+          opacity: 0.4;
+        }
+      }
+
+      .status-text {
+        font-size: 14px;
+        color: var(--muted);
+      }
+
+      .controls {
+        display: flex;
+        gap: 12px;
+        justify-content: center;
+      }
+
+      button {
+        padding: 12px 24px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--text);
+        font-size: 14px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.15s ease;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      button:hover:not(:disabled) {
+        border-color: var(--accent);
+        background: rgba(108, 99, 255, 0.1);
+      }
+
+      button:disabled {
         opacity: 0.4;
+        cursor: not-allowed;
       }
-    }
 
-    .status-text {
-      font-size: 14px;
-      color: var(--muted);
-    }
+      button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: white;
+      }
 
-    .controls {
-      display: flex;
-      gap: 12px;
-      justify-content: center;
-    }
+      button.primary:hover:not(:disabled) {
+        background: var(--accent-hover);
+      }
 
-    button {
-      padding: 12px 24px;
-      border-radius: 8px;
-      border: 1px solid var(--border);
-      background: var(--surface);
-      color: var(--text);
-      font-size: 14px;
-      font-weight: 500;
-      cursor: pointer;
-      transition: all 0.15s ease;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
+      button.danger {
+        border-color: var(--red);
+        color: var(--red);
+      }
 
-    button:hover:not(:disabled) {
-      border-color: var(--accent);
-      background: rgba(108, 99, 255, 0.1);
-    }
+      button.danger:hover:not(:disabled) {
+        background: rgba(229, 57, 53, 0.1);
+      }
 
-    button:disabled {
-      opacity: 0.4;
-      cursor: not-allowed;
-    }
+      .visualizer {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 3px;
+        height: 48px;
+        margin: 20px 0;
+      }
 
-    button.primary {
-      background: var(--accent);
-      border-color: var(--accent);
-      color: white;
-    }
-
-    button.primary:hover:not(:disabled) {
-      background: var(--accent-hover);
-    }
-
-    button.danger {
-      border-color: var(--red);
-      color: var(--red);
-    }
-
-    button.danger:hover:not(:disabled) {
-      background: rgba(229, 57, 53, 0.1);
-    }
-
-    .visualizer {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 3px;
-      height: 48px;
-      margin: 20px 0;
-    }
-
-    .visualizer .bar {
-      width: 4px;
-      background: var(--accent);
-      border-radius: 2px;
-      transition: height 0.1s ease;
-      height: 4px;
-    }
-
-    .visualizer.active .bar {
-      animation: sound-bar 0.6s ease-in-out infinite alternate;
-    }
-
-    @keyframes sound-bar {
-      0% {
+      .visualizer .bar {
+        width: 4px;
+        background: var(--accent);
+        border-radius: 2px;
+        transition: height 0.1s ease;
         height: 4px;
       }
 
-      100% {
-        height: 32px;
+      .visualizer.active .bar {
+        animation: sound-bar 0.6s ease-in-out infinite alternate;
       }
-    }
 
-    .visualizer.active .bar:nth-child(1) {
-      animation-delay: 0s;
-    }
+      @keyframes sound-bar {
+        0% {
+          height: 4px;
+        }
 
-    .visualizer.active .bar:nth-child(2) {
-      animation-delay: 0.1s;
-    }
+        100% {
+          height: 32px;
+        }
+      }
 
-    .visualizer.active .bar:nth-child(3) {
-      animation-delay: 0.05s;
-    }
+      .visualizer.active .bar:nth-child(1) {
+        animation-delay: 0s;
+      }
 
-    .visualizer.active .bar:nth-child(4) {
-      animation-delay: 0.15s;
-    }
+      .visualizer.active .bar:nth-child(2) {
+        animation-delay: 0.1s;
+      }
 
-    .visualizer.active .bar:nth-child(5) {
-      animation-delay: 0.08s;
-    }
+      .visualizer.active .bar:nth-child(3) {
+        animation-delay: 0.05s;
+      }
 
-    .visualizer.active .bar:nth-child(6) {
-      animation-delay: 0.12s;
-    }
+      .visualizer.active .bar:nth-child(4) {
+        animation-delay: 0.15s;
+      }
 
-    .visualizer.active .bar:nth-child(7) {
-      animation-delay: 0.03s;
-    }
+      .visualizer.active .bar:nth-child(5) {
+        animation-delay: 0.08s;
+      }
 
-    .transcript {
-      margin-top: 16px;
-      max-height: 200px;
-      overflow-y: auto;
-      font-size: 13px;
-      line-height: 1.6;
-      color: var(--muted);
-      border-top: 1px solid var(--border);
-      padding-top: 12px;
-    }
+      .visualizer.active .bar:nth-child(6) {
+        animation-delay: 0.12s;
+      }
 
-    .transcript .entry {
-      padding: 4px 0;
-    }
+      .visualizer.active .bar:nth-child(7) {
+        animation-delay: 0.03s;
+      }
 
-    .transcript .entry.agent {
-      color: var(--accent);
-    }
+      .transcript {
+        margin-top: 16px;
+        max-height: 200px;
+        overflow-y: auto;
+        font-size: 13px;
+        line-height: 1.6;
+        color: var(--muted);
+        border-top: 1px solid var(--border);
+        padding-top: 12px;
+      }
 
-    .transcript .entry.user {
-      color: var(--text);
-    }
+      .transcript .entry {
+        padding: 4px 0;
+      }
 
-    .info {
-      text-align: center;
-      font-size: 12px;
-      color: var(--muted);
-      margin-top: 8px;
-    }
+      .transcript .entry.agent {
+        color: var(--accent);
+      }
 
-    .icon {
-      font-size: 18px;
-    }
+      .transcript .entry.user {
+        color: var(--text);
+      }
 
-    #error-msg {
-      color: var(--red);
-      font-size: 13px;
-      text-align: center;
-      margin-top: 12px;
-      display: none;
-    }
-  </style>
-</head>
+      .info {
+        text-align: center;
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 8px;
+      }
 
-<body>
-  <div class="container">
-    <div class="header">
-      <h1>Stimm Voice</h1>
-      <p>Real-time voice conversation</p>
+      .icon {
+        font-size: 18px;
+      }
+
+      #error-msg {
+        color: var(--red);
+        font-size: 13px;
+        text-align: center;
+        margin-top: 12px;
+        display: none;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="container">
+      <div class="header">
+        <h1>Stimm Voice</h1>
+        <p>Real-time voice conversation</p>
+      </div>
+
+      <div class="card">
+        <div class="status-indicator">
+          <div class="status-dot" id="status-dot"></div>
+          <span class="status-text" id="status-text">Disconnected</span>
+        </div>
+
+        <div class="visualizer" id="visualizer">
+          <div class="bar"></div>
+          <div class="bar"></div>
+          <div class="bar"></div>
+          <div class="bar"></div>
+          <div class="bar"></div>
+          <div class="bar"></div>
+          <div class="bar"></div>
+        </div>
+
+        <div class="controls">
+          <button class="primary" id="btn-connect" onclick="toggleConnection()">
+            <span class="icon">🎙️</span> Connect
+          </button>
+          <button id="btn-mute" onclick="toggleMute()" disabled>
+            <span class="icon">🔇</span> Mute
+          </button>
+        </div>
+
+        <div id="error-msg"></div>
+
+        <div class="transcript" id="transcript"></div>
+      </div>
+
+      <div class="info" id="room-info"></div>
     </div>
 
-    <div class="card">
-      <div class="status-indicator">
-        <div class="status-dot" id="status-dot"></div>
-        <span class="status-text" id="status-text">Disconnected</span>
-      </div>
+    <!-- LiveKit browser SDK (from CDN). -->
+    <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.js"></script>
+    <script>
+      // -----------------------------------------------------------------------
+      // State
+      // -----------------------------------------------------------------------
+      let room = null;
+      let localTrack = null;
+      let connected = false;
+      let muted = false;
+      const remoteAudioElements = new Map();
+      const remoteAudioByParticipant = new Map();
 
-      <div class="visualizer" id="visualizer">
-        <div class="bar"></div>
-        <div class="bar"></div>
-        <div class="bar"></div>
-        <div class="bar"></div>
-        <div class="bar"></div>
-        <div class="bar"></div>
-        <div class="bar"></div>
-      </div>
+      const $ = (id) => document.getElementById(id);
+      const statusDot = $("status-dot");
+      const statusText = $("status-text");
+      const btnConnect = $("btn-connect");
+      const btnMute = $("btn-mute");
+      const visualizer = $("visualizer");
+      const transcriptEl = $("transcript");
+      const roomInfo = $("room-info");
+      const errorMsg = $("error-msg");
 
-      <div class="controls">
-        <button class="primary" id="btn-connect" onclick="toggleConnection()">
-          <span class="icon">🎙️</span> Connect
-        </button>
-        <button id="btn-mute" onclick="toggleMute()" disabled>
-          <span class="icon">🔇</span> Mute
-        </button>
-      </div>
+      // -----------------------------------------------------------------------
+      // API helpers
+      // -----------------------------------------------------------------------
 
-      <div id="error-msg"></div>
+      /** Resolve session credentials via claim exchange or direct session create (dev mode). */
+      async function createSession() {
+        const voicePath = window.location.pathname.replace(/\/$/, "") || "/voice";
+        const claimPath = `${voicePath}/claim`;
+        const params = new URLSearchParams(window.location.search);
+        const claim = params.get("claim");
 
-      <div class="transcript" id="transcript"></div>
-    </div>
+        const res = claim
+          ? await fetch(claimPath, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ claim }),
+            })
+          : await fetch(voicePath, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+            });
 
-    <div class="info" id="room-info"></div>
-  </div>
+        if (!res.ok) {
+          const body = await res.text();
+          if (claim) {
+            throw new Error(`Failed to exchange claim: ${res.status} ${body}`);
+          }
+          throw new Error(
+            `Failed to create session: ${res.status} ${body}. ` +
+              "Use a claim link, or enable direct web session create in config.",
+          );
+        }
+        return await res.json();
+      }
 
-  <!-- LiveKit browser SDK (from CDN). -->
-  <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.js"></script>
-  <script>
-    // -----------------------------------------------------------------------
-    // State
-    // -----------------------------------------------------------------------
-    let room = null;
-    let localTrack = null;
-    let connected = false;
-    let muted = false;
-    const remoteAudioElements = new Map();
-    const remoteAudioByParticipant = new Map();
+      // -----------------------------------------------------------------------
+      // Connection
+      // -----------------------------------------------------------------------
 
-    const $ = (id) => document.getElementById(id);
-    const statusDot = $("status-dot");
-    const statusText = $("status-text");
-    const btnConnect = $("btn-connect");
-    const btnMute = $("btn-mute");
-    const visualizer = $("visualizer");
-    const transcriptEl = $("transcript");
-    const roomInfo = $("room-info");
-    const errorMsg = $("error-msg");
+      async function toggleConnection() {
+        if (connected) {
+          await disconnect();
+        } else {
+          await connect();
+        }
+      }
 
-    // -----------------------------------------------------------------------
-    // API helpers
-    // -----------------------------------------------------------------------
+      async function connect() {
+        setStatus("connecting", "Connecting...");
+        hideError();
 
-    /** Resolve session credentials via claim exchange or direct session create (dev mode). */
-    async function createSession() {
-      const voicePath = window.location.pathname.replace(/\/$/, "") || "/voice";
-      const claimPath = `${voicePath}/claim`;
-      const params = new URLSearchParams(window.location.search);
-      const claim = params.get("claim");
+        try {
+          // 1. Get a token from the gateway.
+          const session = await createSession();
+          const token = session.clientToken;
+          const roomName = session.room;
 
-      const res = claim
-        ? await fetch(claimPath, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ claim }),
-          })
-        : await fetch(voicePath, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
+          // 2. Resolve the LiveKit WebSocket URL.
+          //    Priority: session.livekitUrl (server-provided) > ?livekit= query param > auto-detect.
+          //    Auto-detect: HTTPS → wss://<host>:7443, HTTP → ws://<host>:7880.
+          const params = new URLSearchParams(window.location.search);
+          const livekitOverride = params.get("livekit");
+          const serverLivekitUrl = session.livekitUrl || null;
+          let livekitUrl;
+          if (serverLivekitUrl) {
+            livekitUrl = serverLivekitUrl;
+          } else if (livekitOverride) {
+            livekitUrl = livekitOverride;
+          } else {
+            const isSecure = window.location.protocol === "https:";
+            const wsProtocol = isSecure ? "wss:" : "ws:";
+            const livekitPort = isSecure ? "7443" : "7880";
+            livekitUrl = `${wsProtocol}//${window.location.hostname}:${livekitPort}`;
+          }
+
+          // 3. Connect to the LiveKit room.
+          room = new LivekitClient.Room({
+            adaptiveStream: true,
+            dynacast: true,
           });
 
-      if (!res.ok) {
-        const body = await res.text();
-        if (claim) {
-          throw new Error(`Failed to exchange claim: ${res.status} ${body}`);
-        }
-        throw new Error(
-          `Failed to create session: ${res.status} ${body}. ` +
-            "Use a claim link, or enable direct web session create in config.",
-        );
-      }
-      return await res.json();
-    }
+          room.on(LivekitClient.RoomEvent.Disconnected, () => {
+            setStatus("disconnected", "Disconnected");
+            onDisconnected();
+          });
 
-    // -----------------------------------------------------------------------
-    // Connection
-    // -----------------------------------------------------------------------
+          room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, pub, participant) => {
+            if (track.kind === LivekitClient.Track.Kind.Audio) {
+              const participantId = participant?.identity || "unknown";
+              // Avoid duplicate playback when TrackSubscribed fires multiple times
+              // for the same publication (mobile reconnects / renegotiation).
+              const key = pub?.trackSid || track.sid || `${participantId}:audio`;
 
-    async function toggleConnection() {
-      if (connected) {
-        await disconnect();
-      } else {
-        await connect();
-      }
-    }
-
-    async function connect() {
-      setStatus("connecting", "Connecting...");
-      hideError();
-
-      try {
-        // 1. Get a token from the gateway.
-        const session = await createSession();
-        const token = session.clientToken;
-        const roomName = session.room;
-
-        // 2. Resolve the LiveKit WebSocket URL.
-        //    Priority: session.livekitUrl (server-provided) > ?livekit= query param > auto-detect.
-        //    Auto-detect: HTTPS → wss://<host>:7443, HTTP → ws://<host>:7880.
-        const params = new URLSearchParams(window.location.search);
-        const livekitOverride = params.get("livekit");
-        const serverLivekitUrl = session.livekitUrl || null;
-        let livekitUrl;
-        if (serverLivekitUrl) {
-          livekitUrl = serverLivekitUrl;
-        } else if (livekitOverride) {
-          livekitUrl = livekitOverride;
-        } else {
-          const isSecure = window.location.protocol === "https:";
-          const wsProtocol = isSecure ? "wss:" : "ws:";
-          const livekitPort = isSecure ? "7443" : "7880";
-          livekitUrl = `${wsProtocol}//${window.location.hostname}:${livekitPort}`;
-        }
-
-        // 3. Connect to the LiveKit room.
-        room = new LivekitClient.Room({
-          adaptiveStream: true,
-          dynacast: true,
-        });
-
-        room.on(LivekitClient.RoomEvent.Disconnected, () => {
-          setStatus("disconnected", "Disconnected");
-          onDisconnected();
-        });
-
-        room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, pub, participant) => {
-          if (track.kind === LivekitClient.Track.Kind.Audio) {
-            const participantId = participant?.identity || "unknown";
-            // Avoid duplicate playback when TrackSubscribed fires multiple times
-            // for the same publication (mobile reconnects / renegotiation).
-            const key =
-              pub?.trackSid ||
-              track.sid ||
-              `${participantId}:audio`;
-
-            // Hard guarantee: only one active audio element per participant.
-            // Some reconnection paths create multiple subscribed audio tracks
-            // before unsubscribing the previous one.
-            const previousKey = remoteAudioByParticipant.get(participantId);
-            if (previousKey && previousKey !== key) {
-              const previousEl = remoteAudioElements.get(previousKey);
-              if (previousEl) {
-                try {
-                  previousEl.remove();
-                } catch {}
-                remoteAudioElements.delete(previousKey);
+              // Hard guarantee: only one active audio element per participant.
+              // Some reconnection paths create multiple subscribed audio tracks
+              // before unsubscribing the previous one.
+              const previousKey = remoteAudioByParticipant.get(participantId);
+              if (previousKey && previousKey !== key) {
+                const previousEl = remoteAudioElements.get(previousKey);
+                if (previousEl) {
+                  try {
+                    previousEl.remove();
+                  } catch {}
+                  remoteAudioElements.delete(previousKey);
+                }
               }
+              const prev = remoteAudioElements.get(key);
+              if (prev) {
+                try {
+                  prev.remove();
+                } catch {}
+                remoteAudioElements.delete(key);
+              }
+              const el = track.attach();
+              el.setAttribute("data-lk-track", key);
+              el.setAttribute("data-lk-participant", participantId);
+              document.body.appendChild(el);
+              remoteAudioElements.set(key, el);
+              remoteAudioByParticipant.set(participantId, key);
             }
-            const prev = remoteAudioElements.get(key);
-            if (prev) {
-              try {
-                prev.remove();
-              } catch {}
-              remoteAudioElements.delete(key);
-            }
-            const el = track.attach();
-            el.setAttribute("data-lk-track", key);
-            el.setAttribute("data-lk-participant", participantId);
-            document.body.appendChild(el);
-            remoteAudioElements.set(key, el);
-            remoteAudioByParticipant.set(participantId, key);
-          }
-        });
+          });
 
-        room.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track, pub) => {
-          const key = pub?.trackSid || track?.sid;
-          if (!key) return;
-          const el = remoteAudioElements.get(key);
-          if (!el) return;
-          try {
-            track?.detach(el);
-          } catch {}
+          room.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track, pub) => {
+            const key = pub?.trackSid || track?.sid;
+            if (!key) return;
+            const el = remoteAudioElements.get(key);
+            if (!el) return;
+            try {
+              track?.detach(el);
+            } catch {}
+            try {
+              el.remove();
+            } catch {}
+            remoteAudioElements.delete(key);
+            const participantId = el.getAttribute("data-lk-participant") || "";
+            if (participantId && remoteAudioByParticipant.get(participantId) === key) {
+              remoteAudioByParticipant.delete(participantId);
+            }
+          });
+
+          room.on(LivekitClient.RoomEvent.DataReceived, (payload, participant, kind) => {
+            try {
+              const msg = JSON.parse(new TextDecoder().decode(payload));
+              if (msg.type === "transcript" || msg.type === "response") {
+                // Partial transcripts are high-frequency and may duplicate final text.
+                if (msg.type === "transcript" && msg.partial === true) {
+                  return;
+                }
+                addTranscript(
+                  msg.type === "transcript" ? "user" : "agent",
+                  msg.text || msg.data || "",
+                );
+              }
+            } catch {
+              // Non-JSON data, ignore.
+            }
+          });
+
+          await room.connect(livekitUrl, token);
+
+          // 4. Publish the local microphone and force SOURCE_MICROPHONE.
+          localTrack = await LivekitClient.createLocalAudioTrack({
+            autoGainControl: true,
+            echoCancellation: true,
+            noiseSuppression: true,
+          });
+          const micSource =
+            LivekitClient?.Track?.Source?.Microphone ??
+            LivekitClient?.Track?.Source?.SOURCE_MICROPHONE;
+          const publishOpts = micSource ? { source: micSource } : undefined;
+          await room.localParticipant.publishTrack(localTrack, publishOpts);
+          if (localTrack.muted) {
+            localTrack.unmute();
+          }
+
+          connected = true;
+          muted = false;
+          setStatus("connected", `Connected — ${roomName}`);
+          btnConnect.innerHTML = '<span class="icon">⏹️</span> Disconnect';
+          btnConnect.classList.remove("primary");
+          btnConnect.classList.add("danger");
+          btnMute.disabled = false;
+          visualizer.classList.add("active");
+          roomInfo.textContent = `Room: ${roomName}`;
+        } catch (err) {
+          console.error("Connection failed:", err);
+          setStatus("error", "Connection failed");
+          showError(err.message || "Could not connect to voice session.");
+          onDisconnected();
+        }
+      }
+
+      async function disconnect() {
+        if (room) {
+          await room.disconnect();
+          room = null;
+        }
+        if (localTrack) {
+          localTrack.stop();
+          localTrack = null;
+        }
+        for (const el of remoteAudioElements.values()) {
           try {
             el.remove();
           } catch {}
-          remoteAudioElements.delete(key);
-          const participantId = el.getAttribute("data-lk-participant") || "";
-          if (participantId && remoteAudioByParticipant.get(participantId) === key) {
-            remoteAudioByParticipant.delete(participantId);
-          }
-        });
-
-        room.on(LivekitClient.RoomEvent.DataReceived, (payload, participant, kind) => {
-          try {
-            const msg = JSON.parse(new TextDecoder().decode(payload));
-            if (msg.type === "transcript" || msg.type === "response") {
-              // Partial transcripts are high-frequency and may duplicate final text.
-              if (msg.type === "transcript" && msg.partial === true) {
-                return;
-              }
-              addTranscript(
-                msg.type === "transcript" ? "user" : "agent",
-                msg.text || msg.data || "",
-              );
-            }
-          } catch {
-            // Non-JSON data, ignore.
-          }
-        });
-
-        await room.connect(livekitUrl, token);
-
-        // 4. Publish the local microphone and force SOURCE_MICROPHONE.
-        localTrack = await LivekitClient.createLocalAudioTrack({
-          autoGainControl: true,
-          echoCancellation: true,
-          noiseSuppression: true,
-        });
-        const micSource =
-          LivekitClient?.Track?.Source?.Microphone ??
-          LivekitClient?.Track?.Source?.SOURCE_MICROPHONE;
-        const publishOpts = micSource ? { source: micSource } : undefined;
-        await room.localParticipant.publishTrack(localTrack, publishOpts);
-        if (localTrack.muted) {
-          localTrack.unmute();
         }
-
-        connected = true;
-        muted = false;
-        setStatus("connected", `Connected — ${roomName}`);
-        btnConnect.innerHTML = '<span class="icon">⏹️</span> Disconnect';
-        btnConnect.classList.remove("primary");
-        btnConnect.classList.add("danger");
-        btnMute.disabled = false;
-        visualizer.classList.add("active");
-        roomInfo.textContent = `Room: ${roomName}`;
-      } catch (err) {
-        console.error("Connection failed:", err);
-        setStatus("error", "Connection failed");
-        showError(err.message || "Could not connect to voice session.");
+        remoteAudioElements.clear();
+        remoteAudioByParticipant.clear();
         onDisconnected();
+        setStatus("disconnected", "Disconnected");
       }
-    }
 
-    async function disconnect() {
-      if (room) {
-        await room.disconnect();
-        room = null;
-      }
-      if (localTrack) {
-        localTrack.stop();
-        localTrack = null;
-      }
-      for (const el of remoteAudioElements.values()) {
-        try {
-          el.remove();
-        } catch {}
-      }
-      remoteAudioElements.clear();
-      remoteAudioByParticipant.clear();
-      onDisconnected();
-      setStatus("disconnected", "Disconnected");
-    }
-
-    function onDisconnected() {
-      connected = false;
-      muted = false;
-      btnConnect.innerHTML = '<span class="icon">🎙️</span> Connect';
-      btnConnect.classList.add("primary");
-      btnConnect.classList.remove("danger");
-      btnMute.disabled = true;
-      btnMute.innerHTML = '<span class="icon">🔇</span> Mute';
-      visualizer.classList.remove("active");
-      roomInfo.textContent = "";
-    }
-
-    // -----------------------------------------------------------------------
-    // Mute
-    // -----------------------------------------------------------------------
-
-    function toggleMute() {
-      if (!localTrack) return;
-      muted = !muted;
-      if (muted) {
-        localTrack.mute();
-        btnMute.innerHTML = '<span class="icon">🔊</span> Unmute';
-        visualizer.classList.remove("active");
-      } else {
-        localTrack.unmute();
+      function onDisconnected() {
+        connected = false;
+        muted = false;
+        btnConnect.innerHTML = '<span class="icon">🎙️</span> Connect';
+        btnConnect.classList.add("primary");
+        btnConnect.classList.remove("danger");
+        btnMute.disabled = true;
         btnMute.innerHTML = '<span class="icon">🔇</span> Mute';
-        visualizer.classList.add("active");
+        visualizer.classList.remove("active");
+        roomInfo.textContent = "";
       }
-    }
 
-    // -----------------------------------------------------------------------
-    // UI helpers
-    // -----------------------------------------------------------------------
+      // -----------------------------------------------------------------------
+      // Mute
+      // -----------------------------------------------------------------------
 
-    function setStatus(state, text) {
-      statusDot.className = "status-dot " + state;
-      statusText.textContent = text;
-    }
+      function toggleMute() {
+        if (!localTrack) return;
+        muted = !muted;
+        if (muted) {
+          localTrack.mute();
+          btnMute.innerHTML = '<span class="icon">🔊</span> Unmute';
+          visualizer.classList.remove("active");
+        } else {
+          localTrack.unmute();
+          btnMute.innerHTML = '<span class="icon">🔇</span> Mute';
+          visualizer.classList.add("active");
+        }
+      }
 
-    function addTranscript(role, text) {
-      if (!text.trim()) return;
-      const div = document.createElement("div");
-      div.className = `entry ${role}`;
-      div.textContent = (role === "user" ? "You: " : "Agent: ") + text;
-      transcriptEl.appendChild(div);
-      transcriptEl.scrollTop = transcriptEl.scrollHeight;
-    }
+      // -----------------------------------------------------------------------
+      // UI helpers
+      // -----------------------------------------------------------------------
 
-    function showError(msg) {
-      errorMsg.textContent = msg;
-      errorMsg.style.display = "block";
-    }
+      function setStatus(state, text) {
+        statusDot.className = "status-dot " + state;
+        statusText.textContent = text;
+      }
 
-    function hideError() {
-      errorMsg.style.display = "none";
-    }
-  </script>
-</body>
+      function addTranscript(role, text) {
+        if (!text.trim()) return;
+        const div = document.createElement("div");
+        div.className = `entry ${role}`;
+        div.textContent = (role === "user" ? "You: " : "Agent: ") + text;
+        transcriptEl.appendChild(div);
+        transcriptEl.scrollTop = transcriptEl.scrollHeight;
+      }
 
+      function showError(msg) {
+        errorMsg.textContent = msg;
+        errorMsg.style.display = "block";
+      }
+
+      function hideError() {
+        errorMsg.style.display = "none";
+      }
+    </script>
+  </body>
 </html>

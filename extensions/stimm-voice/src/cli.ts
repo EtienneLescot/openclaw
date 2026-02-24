@@ -60,7 +60,8 @@ export function registerStimmVoiceCli(deps: VoiceCliDeps): void {
     .description("Start a new voice session")
     .option("--channel <channel>", "Origin channel", "web")
     .option("--room <name>", "Custom room name")
-    .action(async (opts: { channel: string; room?: string }) => {
+    .option("--wait", "Keep process alive and end the session on exit (Ctrl+C / SIGTERM)")
+    .action(async (opts: { channel: string; room?: string; wait?: boolean }) => {
       if (!config.enabled) {
         logger.error("[stimm-voice] Plugin is disabled. Set stimm-voice.enabled=true in config.");
         return;
@@ -88,6 +89,36 @@ export function registerStimmVoiceCli(deps: VoiceCliDeps): void {
       } else {
         logger.info(`  Token: ${session.clientToken}`);
         logger.info(`  Use this token to connect from a LiveKit client.`);
+      }
+
+      if (opts.wait) {
+        logger.info(`  Press Ctrl+C (or send SIGTERM) to end the session and exit.`);
+        let exiting = false;
+        const cleanup = async () => {
+          if (exiting) return;
+          exiting = true;
+          logger.info(`\n[stimm-voice] Ending session "${session.roomName}"…`);
+          try {
+            const rt2 = await ensureRuntime();
+            const ok = await rt2.roomManager.endSession(session.roomName);
+            if (ok) {
+              logger.info(`[stimm-voice] Session ended.`);
+            } else {
+              logger.info(`[stimm-voice] Session already gone (remote teardown?).`);
+            }
+          } catch (err) {
+            logger.error(
+              `[stimm-voice] Failed to end session: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+          process.exit(0);
+        };
+        process.once("SIGINT", () => void cleanup());
+        process.once("SIGTERM", () => void cleanup());
+        // Keep the event loop alive until a signal fires.
+        await new Promise<void>((_resolve) => {
+          /* intentionally unresolved — exits via signal handlers above */
+        });
       }
     });
 
