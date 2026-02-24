@@ -59,7 +59,7 @@ function saveConfig(entries: Record<string, unknown>): void {
 
 interface ExistingConfig {
   stt?: { provider?: string; model?: string; language?: string; apiKey?: string };
-  tts?: { provider?: string; model?: string; voice?: string; apiKey?: string };
+  tts?: { provider?: string; model?: string; voice?: string; language?: string; apiKey?: string };
   llm?: { provider?: string; model?: string; apiKey?: string };
   livekit?: { url?: string; apiKey?: string; apiSecret?: string };
   access?: { mode?: string; supervisorSecret?: string };
@@ -117,7 +117,7 @@ const TTS_META: Record<TtsProvider, { label: string; defaultModel: string; defau
     openai: { label: "OpenAI", defaultModel: "gpt-4o-mini-tts", defaultVoice: "ash" },
     elevenlabs: { label: "ElevenLabs", defaultModel: "eleven_turbo_v2_5", defaultVoice: "rachel" },
     cartesia: { label: "Cartesia", defaultModel: "sonic-2", defaultVoice: "default" },
-    google: { label: "Google Cloud", defaultModel: "en-US-Neural2-F", defaultVoice: "default" },
+    google: { label: "Google Cloud", defaultModel: "Standard", defaultVoice: "en-US-Standard-A" },
     azure: { label: "Azure Speech", defaultModel: "en-US-JennyNeural", defaultVoice: "default" },
     aws: { label: "Amazon Polly", defaultModel: "neural", defaultVoice: "Joanna" },
     playai: { label: "PlayAI", defaultModel: "default", defaultVoice: "default" },
@@ -134,6 +134,41 @@ const LLM_META: Record<LlmProvider, { label: string; defaultModel: string }> = {
   fireworks: { label: "Fireworks", defaultModel: "llama-v3p3-70b-instruct" },
   together: { label: "Together AI", defaultModel: "meta-llama/Llama-3.3-70B-Instruct-Turbo" },
   sambanova: { label: "SambaNova", defaultModel: "Meta-Llama-3.3-70B-Instruct" },
+};
+
+const STT_MODEL_OPTIONS: Record<SttProvider, string[]> = {
+  deepgram: ["nova-3", "nova-2"],
+  openai: ["gpt-4o-mini-transcribe", "gpt-4o-transcribe", "whisper-1"],
+  google: ["latest_long", "latest_short", "chirp", "chirp_2"],
+  azure: ["en-US", "fr-FR", "de-DE"],
+  assemblyai: ["best", "nano"],
+  aws: ["default"],
+  speechmatics: ["enhanced"],
+  clova: ["default"],
+  fal: ["default"],
+};
+
+const TTS_MODEL_OPTIONS: Record<TtsProvider, string[]> = {
+  openai: ["gpt-4o-mini-tts", "gpt-4o-audio-preview"],
+  elevenlabs: ["eleven_turbo_v2_5", "eleven_multilingual_v2", "eleven_flash_v2_5"],
+  cartesia: ["sonic-2", "sonic-english", "sonic-multilingual"],
+  google: ["gemini-2.5-flash-preview-tts", "gemini-2.0-flash-exp", "Standard"],
+  azure: ["en-US-JennyNeural", "fr-FR-DeniseNeural"],
+  aws: ["standard", "neural", "generative"],
+  playai: ["dialog"],
+  rime: ["arcana"],
+};
+
+const LLM_MODEL_OPTIONS: Record<LlmProvider, string[]> = {
+  openai: ["gpt-4o-mini", "gpt-4.1-mini", "gpt-4.1", "gpt-4o"],
+  anthropic: ["claude-sonnet-4-20250514", "claude-3-7-sonnet-latest", "claude-3-5-haiku-latest"],
+  google: ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"],
+  groq: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
+  azure: ["gpt-4o-mini", "gpt-4o"],
+  cerebras: ["llama-3.3-70b"],
+  fireworks: ["llama-v3p3-70b-instruct", "qwen3-235b-a22b"],
+  together: ["meta-llama/Llama-3.3-70B-Instruct-Turbo", "deepseek-ai/DeepSeek-V3"],
+  sambanova: ["Meta-Llama-3.3-70B-Instruct", "DeepSeek-R1"],
 };
 
 // ---------------------------------------------------------------------------
@@ -227,6 +262,354 @@ async function clack(): Promise<Clack> {
 
 function isCancel(value: unknown): value is symbol {
   return typeof value === "symbol";
+}
+
+type ModelLane = "stt" | "tts" | "llm";
+
+function uniq(values: string[]): string[] {
+  return [...new Set(values.filter((value) => value.trim().length > 0))];
+}
+
+function filterModelsForLane(models: string[], lane: ModelLane, provider: string): string[] {
+  if (provider === "openai") {
+    if (lane === "stt") {
+      return models.filter((id) => /transcribe|whisper/i.test(id));
+    }
+    if (lane === "tts") {
+      return models.filter((id) => /tts|audio/i.test(id));
+    }
+    return models.filter((id) => !/transcribe|whisper/i.test(id));
+  }
+
+  if (provider === "google") {
+    if (lane === "tts") {
+      return models.filter((id) => /tts|speech/i.test(id));
+    }
+    if (lane === "stt") {
+      return models.filter((id) => /chirp|speech/i.test(id));
+    }
+  }
+
+  return models;
+}
+
+async function fetchJson(
+  url: string,
+  init: RequestInit = {},
+  timeoutMs = 10_000,
+): Promise<unknown> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    return response.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function getLiveKitDocsPluginUrl(lane: ModelLane, provider: string): string {
+  return `https://docs.livekit.io/agents/models/${lane}/plugins/${provider}`;
+}
+
+function extractModelLikeTokens(raw: string): string[] {
+  const tokens = new Set<string>();
+  const quoteRegex = /["'`]([A-Za-z0-9._\-/:]{3,120})["'`]/g;
+  let match: RegExpExecArray | null;
+  while ((match = quoteRegex.exec(raw)) !== null) {
+    const value = match[1] ?? "";
+    if (!value) continue;
+    if (/^https?:\/\//i.test(value)) continue;
+    if (/^(true|false|null|undefined)$/i.test(value)) continue;
+    if (!/[a-z]/i.test(value)) continue;
+    if (!/[0-9]|-|\//.test(value)) continue;
+    tokens.add(value);
+  }
+  return [...tokens];
+}
+
+function extractVoiceLikeTokens(raw: string): string[] {
+  const tokens = new Set<string>();
+  const regexes = [
+    /voice(?:_id|_name)?\s*[:=]\s*["'`]([^"'`]{2,120})["'`]/gi,
+    /speaker\s*[:=]\s*["'`]([^"'`]{2,120})["'`]/gi,
+  ];
+  for (const regex of regexes) {
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(raw)) !== null) {
+      const value = (match[1] ?? "").trim();
+      if (!value) continue;
+      tokens.add(value);
+    }
+  }
+  return [...tokens];
+}
+
+function extractLanguageLikeTokens(raw: string): string[] {
+  const tokens = new Set<string>();
+  const regexes = [
+    /languages?\s*[:=]\s*\[\s*["'`]([^"'`]{2,20})["'`]/gi,
+    /languages?\s*[:=]\s*["'`]([^"'`]{2,20})["'`]/gi,
+    /\b([a-z]{2}-[A-Z]{2})\b/g,
+  ];
+  for (const regex of regexes) {
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(raw)) !== null) {
+      const value = (match[1] ?? "").trim();
+      if (!value) continue;
+      tokens.add(value);
+    }
+  }
+  return [...tokens];
+}
+
+async function fetchModelsFromLiveKitDocs(lane: ModelLane, provider: string): Promise<string[]> {
+  const url = getLiveKitDocsPluginUrl(lane, provider);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) return [];
+    const html = await response.text();
+    const extracted = extractModelLikeTokens(html);
+    return filterModelsForLane(uniq(extracted), lane, provider).slice(0, 80);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchVoicesFromLiveKitDocs(lane: ModelLane, provider: string): Promise<string[]> {
+  const url = getLiveKitDocsPluginUrl(lane, provider);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) return [];
+    const html = await response.text();
+    return uniq(extractVoiceLikeTokens(html)).slice(0, 80);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchLanguagesFromLiveKitDocs(lane: ModelLane, provider: string): Promise<string[]> {
+  const url = getLiveKitDocsPluginUrl(lane, provider);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) return [];
+    const html = await response.text();
+    return uniq(extractLanguageLikeTokens(html)).slice(0, 80);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchOpenAICompatibleModels(params: {
+  baseUrl: string;
+  apiKey: string;
+  headers?: Record<string, string>;
+}): Promise<string[]> {
+  const base = params.baseUrl.replace(/\/$/, "");
+  const json = (await fetchJson(`${base}/v1/models`, {
+    headers: {
+      Authorization: `Bearer ${params.apiKey}`,
+      ...(params.headers ?? {}),
+    },
+  })) as { data?: Array<{ id?: string }> };
+  return uniq((json.data ?? []).map((item) => item.id ?? ""));
+}
+
+async function fetchProviderModels(params: {
+  lane: ModelLane;
+  provider: string;
+  apiKey: string;
+}): Promise<string[]> {
+  const { lane, provider, apiKey } = params;
+  const key = apiKey.trim();
+  if (!key) return [];
+
+  let providerModels: string[] = [];
+
+  try {
+    if (provider === "openai") {
+      const baseUrl = process.env.OPENAI_BASE_URL ?? "https://api.openai.com";
+      providerModels = await fetchOpenAICompatibleModels({ baseUrl, apiKey: key });
+    } else if (provider === "groq" && lane === "llm") {
+      providerModels = await fetchOpenAICompatibleModels({
+        baseUrl: "https://api.groq.com/openai",
+        apiKey: key,
+      });
+    } else if (provider === "anthropic" && lane === "llm") {
+      const json = (await fetchJson("https://api.anthropic.com/v1/models", {
+        headers: {
+          "x-api-key": key,
+          "anthropic-version": "2023-06-01",
+        },
+      })) as { data?: Array<{ id?: string }> };
+      providerModels = uniq((json.data ?? []).map((item) => item.id ?? ""));
+    } else if (provider === "google") {
+      const json = (await fetchJson(
+        `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`,
+      )) as { models?: Array<{ name?: string }> };
+      providerModels = uniq(
+        (json.models ?? []).map((item) => {
+          const name = item.name ?? "";
+          return name.startsWith("models/") ? name.slice("models/".length) : name;
+        }),
+      );
+    } else if (provider === "elevenlabs" && lane === "tts") {
+      const json = (await fetchJson("https://api.elevenlabs.io/v1/models", {
+        headers: { "xi-api-key": key },
+      })) as Array<{ model_id?: string }>;
+      providerModels = uniq((json ?? []).map((item) => item.model_id ?? ""));
+    } else if (provider === "cerebras" && lane === "llm") {
+      providerModels = await fetchOpenAICompatibleModels({
+        baseUrl: "https://api.cerebras.ai",
+        apiKey: key,
+      });
+    } else if (provider === "fireworks" && lane === "llm") {
+      providerModels = await fetchOpenAICompatibleModels({
+        baseUrl: "https://api.fireworks.ai/inference",
+        apiKey: key,
+      });
+    } else if (provider === "together" && lane === "llm") {
+      providerModels = await fetchOpenAICompatibleModels({
+        baseUrl: "https://api.together.xyz",
+        apiKey: key,
+      });
+    } else if (provider === "sambanova" && lane === "llm") {
+      providerModels = await fetchOpenAICompatibleModels({
+        baseUrl: "https://api.sambanova.ai",
+        apiKey: key,
+      });
+    } else if (provider === "deepgram" && lane === "stt") {
+      const json = (await fetchJson("https://api.deepgram.com/v1/projects", {
+        headers: { Authorization: `Token ${key}` },
+      })) as { projects?: unknown[] };
+      if (Array.isArray(json.projects)) {
+        providerModels = ["nova-3", "nova-2", "base", "enhanced"]; // Deepgram API has no direct model catalog endpoint.
+      }
+    }
+  } catch {
+    providerModels = [];
+  }
+
+  const filtered = filterModelsForLane(uniq(providerModels), lane, provider);
+  if (filtered.length > 0) {
+    return filtered;
+  }
+
+  // Fallback for providers without usable model listing APIs: derive options from LiveKit plugin docs.
+  return fetchModelsFromLiveKitDocs(lane, provider);
+}
+
+type ProviderCatalog = {
+  models: string[];
+  voices: string[];
+  languages: string[];
+};
+
+async function fetchProviderCatalog(params: {
+  lane: ModelLane;
+  provider: string;
+  apiKey: string;
+}): Promise<ProviderCatalog> {
+  const { lane, provider, apiKey } = params;
+  const models = await fetchProviderModels({ lane, provider, apiKey });
+  let voices: string[] = [];
+  let languages: string[] = [];
+
+  try {
+    if (lane === "tts" && provider === "elevenlabs" && apiKey.trim()) {
+      const json = (await fetchJson("https://api.elevenlabs.io/v1/voices", {
+        headers: { "xi-api-key": apiKey.trim() },
+      })) as { voices?: Array<{ voice_id?: string; name?: string }> };
+      voices = uniq((json.voices ?? []).flatMap((item) => [item.voice_id ?? "", item.name ?? ""]));
+    }
+  } catch {
+    voices = [];
+  }
+
+  if (voices.length === 0 && lane === "tts") {
+    voices = await fetchVoicesFromLiveKitDocs(lane, provider);
+  }
+
+  if (lane === "stt" || lane === "tts") {
+    languages = await fetchLanguagesFromLiveKitDocs(lane, provider);
+  }
+
+  return {
+    models: uniq(models),
+    voices: uniq(voices),
+    languages: uniq(languages),
+  };
+}
+
+async function promptModelWithChoices(params: {
+  c: Clack;
+  lane: ModelLane;
+  provider: string;
+  message: string;
+  options: string[];
+  initialValue: string;
+  placeholder: string;
+}): Promise<string | symbol> {
+  const { c, message, initialValue, placeholder } = params;
+  const currentOptions = uniq(params.options);
+  const modelChoice = (await c.select({
+    message,
+    options: [
+      ...currentOptions.map((value) => ({ value, label: value })),
+      { value: "__custom__", label: "Custom model…" },
+    ],
+    initialValue: currentOptions.includes(initialValue) ? initialValue : "__custom__",
+  })) as string | symbol;
+
+  if (isCancel(modelChoice)) return modelChoice;
+  if (modelChoice !== "__custom__") return modelChoice;
+
+  return c.text({
+    message: "Custom model name",
+    initialValue,
+    placeholder,
+  }) as Promise<string | symbol>;
+}
+
+async function promptTextOrChoice(params: {
+  c: Clack;
+  message: string;
+  options: string[];
+  initialValue: string;
+  placeholder: string;
+  customLabel?: string;
+  allowEmpty?: boolean;
+}): Promise<string | symbol> {
+  const { c, message, options, initialValue, placeholder, customLabel, allowEmpty } = params;
+  const values = uniq(options);
+  const selection = (await c.select({
+    message,
+    options: [
+      ...(allowEmpty ? [{ value: "__empty__", label: "Use provider default" }] : []),
+      ...values.map((value) => ({ value, label: value })),
+      { value: "__custom__", label: customLabel ?? "Custom value…" },
+    ],
+    initialValue: values.includes(initialValue) ? initialValue : "__custom__",
+  })) as string | symbol;
+
+  if (isCancel(selection)) return selection;
+  if (selection === "__empty__") return "";
+  if (selection !== "__custom__") return selection;
+
+  return c.text({
+    message,
+    initialValue,
+    placeholder,
+  }) as Promise<string | symbol>;
 }
 
 // ---------------------------------------------------------------------------
@@ -325,22 +708,6 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
     if (isCancel(sttProviderResult)) return c.outro("Setup cancelled.");
     sttProvider = sttProviderResult;
 
-    const sttModelResult = (await c.text({
-      message: `STT model for ${STT_META[sttProvider].label}`,
-      initialValue: existing.stt?.model ?? STT_META[sttProvider].defaultModel,
-      placeholder: STT_META[sttProvider].defaultModel,
-    })) as string | symbol;
-    if (isCancel(sttModelResult)) return c.outro("Setup cancelled.");
-    sttModel = sttModelResult;
-
-    const sttLanguageResult = (await c.text({
-      message: "STT language code (e.g. fr, en-US, es) — leave blank to use provider default",
-      initialValue: existing.stt?.language ?? "",
-      placeholder: "fr",
-    })) as string | symbol;
-    if (isCancel(sttLanguageResult)) return c.outro("Setup cancelled.");
-    sttLanguage = sttLanguageResult;
-
     const sttEnvName = providerEnvVar(sttProvider);
     const sttEnvValue = sttEnvName ? process.env[sttEnvName] : undefined;
 
@@ -366,6 +733,39 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
       if (isCancel(keyResult)) return c.outro("Setup cancelled.");
       sttApiKey = keyResult;
     }
+
+    await c.log.step(
+      `Fetching available STT models/languages for ${STT_META[sttProvider].label}...`,
+    );
+    const sttCatalog = await fetchProviderCatalog({
+      lane: "stt",
+      provider: sttProvider,
+      apiKey: sttApiKey,
+    });
+
+    const sttModelResult = await promptModelWithChoices({
+      c,
+      lane: "stt",
+      provider: sttProvider,
+      message: `STT model for ${STT_META[sttProvider].label}`,
+      options: uniq([...sttCatalog.models, ...STT_MODEL_OPTIONS[sttProvider]]),
+      initialValue: existing.stt?.model ?? STT_META[sttProvider].defaultModel,
+      placeholder: STT_META[sttProvider].defaultModel,
+    });
+    if (isCancel(sttModelResult)) return c.outro("Setup cancelled.");
+    sttModel = sttModelResult;
+
+    const sttLanguageResult = await promptTextOrChoice({
+      c,
+      message: "STT language code",
+      options: sttCatalog.languages,
+      initialValue: existing.stt?.language ?? "",
+      placeholder: "fr",
+      allowEmpty: true,
+      customLabel: "Custom language code…",
+    });
+    if (isCancel(sttLanguageResult)) return c.outro("Setup cancelled.");
+    sttLanguage = sttLanguageResult;
   }
 
   // -- TTS ----------------------------------------------------------------
@@ -373,6 +773,7 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
   let ttsProvider!: TtsProvider;
   let ttsModel!: string;
   let ttsVoice!: string;
+  let ttsLanguage: string = "";
   let ttsApiKey: string = "";
 
   const hasTtsConfig = !!(existing.tts?.provider && existing.tts?.model);
@@ -391,6 +792,7 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
       ttsProvider = existing.tts!.provider as TtsProvider;
       ttsModel = existing.tts!.model!;
       ttsVoice = existing.tts!.voice ?? TTS_META[ttsProvider].defaultVoice;
+      ttsLanguage = existing.tts!.language ?? "";
       ttsApiKey = existing.tts!.apiKey ?? "";
     }
   }
@@ -407,22 +809,6 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
     })) as TtsProvider | symbol;
     if (isCancel(ttsProviderResult)) return c.outro("Setup cancelled.");
     ttsProvider = ttsProviderResult;
-
-    const ttsModelResult = (await c.text({
-      message: `TTS model for ${TTS_META[ttsProvider].label}`,
-      initialValue: existing.tts?.model ?? TTS_META[ttsProvider].defaultModel,
-      placeholder: TTS_META[ttsProvider].defaultModel,
-    })) as string | symbol;
-    if (isCancel(ttsModelResult)) return c.outro("Setup cancelled.");
-    ttsModel = ttsModelResult;
-
-    const ttsVoiceResult = (await c.text({
-      message: `Voice name for ${TTS_META[ttsProvider].label}`,
-      initialValue: existing.tts?.voice ?? TTS_META[ttsProvider].defaultVoice,
-      placeholder: TTS_META[ttsProvider].defaultVoice,
-    })) as string | symbol;
-    if (isCancel(ttsVoiceResult)) return c.outro("Setup cancelled.");
-    ttsVoice = ttsVoiceResult;
 
     const ttsEnvName = providerEnvVar(ttsProvider);
     const ttsEnvValue = ttsEnvName ? process.env[ttsEnvName] : undefined;
@@ -461,6 +847,53 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
         ttsApiKey = keyResult;
       }
     }
+
+    await c.log.step(
+      `Fetching available TTS models/voices/languages for ${TTS_META[ttsProvider].label}...`,
+    );
+    const ttsCatalog = await fetchProviderCatalog({
+      lane: "tts",
+      provider: ttsProvider,
+      apiKey: ttsApiKey,
+    });
+
+    const ttsModelResult = await promptModelWithChoices({
+      c,
+      lane: "tts",
+      provider: ttsProvider,
+      message: `TTS model for ${TTS_META[ttsProvider].label}`,
+      options: uniq([...ttsCatalog.models, ...TTS_MODEL_OPTIONS[ttsProvider]]),
+      initialValue: existing.tts?.model ?? TTS_META[ttsProvider].defaultModel,
+      placeholder: TTS_META[ttsProvider].defaultModel,
+    });
+    if (isCancel(ttsModelResult)) return c.outro("Setup cancelled.");
+    ttsModel = ttsModelResult;
+
+    const ttsVoiceResult = await promptTextOrChoice({
+      c,
+      message:
+        ttsProvider === "elevenlabs"
+          ? "Voice ID for ElevenLabs (voice_id)"
+          : `Voice name for ${TTS_META[ttsProvider].label}`,
+      options: ttsCatalog.voices,
+      initialValue: existing.tts?.voice ?? TTS_META[ttsProvider].defaultVoice,
+      placeholder: TTS_META[ttsProvider].defaultVoice,
+      customLabel: "Custom voice…",
+    });
+    if (isCancel(ttsVoiceResult)) return c.outro("Setup cancelled.");
+    ttsVoice = ttsVoiceResult;
+
+    const ttsLanguageResult = await promptTextOrChoice({
+      c,
+      message: "TTS language code",
+      options: ttsCatalog.languages,
+      initialValue: existing.tts?.language ?? "",
+      placeholder: "en-US",
+      allowEmpty: true,
+      customLabel: "Custom language code…",
+    });
+    if (isCancel(ttsLanguageResult)) return c.outro("Setup cancelled.");
+    ttsLanguage = ttsLanguageResult;
   }
 
   // -- LLM ----------------------------------------------------------------
@@ -497,14 +930,6 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
     })) as LlmProvider | symbol;
     if (isCancel(llmProviderResult)) return c.outro("Setup cancelled.");
     llmProvider = llmProviderResult;
-
-    const llmModelResult = (await c.text({
-      message: `LLM model for ${LLM_META[llmProvider].label}`,
-      initialValue: existing.llm?.model ?? LLM_META[llmProvider].defaultModel,
-      placeholder: LLM_META[llmProvider].defaultModel,
-    })) as string | symbol;
-    if (isCancel(llmModelResult)) return c.outro("Setup cancelled.");
-    llmModel = llmModelResult;
 
     const llmEnvName = providerEnvVar(llmProvider);
     const llmEnvValue = llmEnvName ? process.env[llmEnvName] : undefined;
@@ -546,6 +971,25 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
         llmApiKey = keyResult;
       }
     }
+
+    await c.log.step(`Fetching available LLM models for ${LLM_META[llmProvider].label}...`);
+    const llmCatalog = await fetchProviderCatalog({
+      lane: "llm",
+      provider: llmProvider,
+      apiKey: llmApiKey,
+    });
+
+    const llmModelResult = await promptModelWithChoices({
+      c,
+      lane: "llm",
+      provider: llmProvider,
+      message: `LLM model for ${LLM_META[llmProvider].label}`,
+      options: uniq([...llmCatalog.models, ...LLM_MODEL_OPTIONS[llmProvider]]),
+      initialValue: existing.llm?.model ?? LLM_META[llmProvider].defaultModel,
+      placeholder: LLM_META[llmProvider].defaultModel,
+    });
+    if (isCancel(llmModelResult)) return c.outro("Setup cancelled.");
+    llmModel = llmModelResult;
   }
 
   // -- LiveKit ------------------------------------------------------------
@@ -631,6 +1075,7 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
     "voiceAgent.tts.provider": ttsProvider,
     "voiceAgent.tts.model": ttsModel,
     "voiceAgent.tts.voice": ttsVoice,
+    ...(ttsLanguage.trim() ? { "voiceAgent.tts.language": ttsLanguage.trim() } : {}),
     ...(ttsApiKey.trim() ? { "voiceAgent.tts.apiKey": ttsApiKey.trim() } : {}),
     "voiceAgent.llm.provider": llmProvider,
     "voiceAgent.llm.model": llmModel,
