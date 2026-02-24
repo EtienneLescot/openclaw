@@ -14,6 +14,7 @@ import {
   AccessToken,
   AgentDispatchClient,
   RoomServiceClient,
+  WebhookReceiver,
   type VideoGrant,
 } from "livekit-server-sdk";
 import type { GatewayRequestHandlerOptions, OpenClawPluginApi } from "openclaw/plugin-sdk";
@@ -756,6 +757,72 @@ const stimmVoicePlugin = {
           res.end(JSON.stringify({ text: result.text ?? "", error: result.error }));
         } catch (err) {
           res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+        }
+      },
+    });
+
+    // -- HTTP route (LiveKit webhook — room/participant lifecycle events) ------
+    //
+    // Configure LiveKit server to POST to <gateway-url>/stimm/livekit-webhook.
+    // Events handled:
+    //   • participant_left  (identity="user") → end session immediately
+    //   • room_finished     (all participants gone) → clean up session map
+    //
+    // If LiveKit HMAC auth is enabled (it is by default), the signature is
+    // verified using the API key/secret already configured in this plugin.
+
+    api.registerHttpRoute({
+      path: "/stimm/livekit-webhook",
+      handler: async (req, res) => {
+        if (req.method !== "POST") {
+          res.writeHead(405);
+          res.end();
+          return;
+        }
+
+        try {
+          const chunks: Buffer[] = [];
+          for await (const chunk of req) chunks.push(chunk as Buffer);
+          const body = Buffer.concat(chunks).toString("utf8");
+
+          // Verify LiveKit HMAC signature (skipAuth=false, uses api key+secret).
+          const authHeader = req.headers["authorization"] ?? req.headers["Authorization"];
+          const receiver = new WebhookReceiver(config.livekit.apiKey, config.livekit.apiSecret);
+          // skipAuth only if no Authorization header is present (local/dev without
+          // webhook signing configured on the server side).
+          const skipAuth = !authHeader;
+          const event = await receiver.receive(
+            body,
+            typeof authHeader === "string" ? authHeader : undefined,
+            skipAuth,
+          );
+
+          const roomName = event.room?.name;
+          api.logger.debug?.(
+            `[stimm-voice] Webhook event=${event.event} room=${roomName ?? "(none)"}`,
+          );
+
+          if (roomName && lkRuntime) {
+            if (event.event === "participant_left" && event.participant?.identity === "user") {
+              // User disconnected — tear down the room immediately.
+              api.logger.info(`[stimm-voice] User left room "${roomName}" — ending session.`);
+              await lkRuntime.endSession(roomName);
+            } else if (event.event === "room_finished") {
+              // All participants gone (Python agent also done) — clean up map.
+              api.logger.info(`[stimm-voice] Room "${roomName}" finished — cleaning up session.`);
+              await lkRuntime.endSession(roomName);
+            }
+          }
+
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          api.logger.warn(
+            `[stimm-voice] Webhook error: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          // Return 400 so LiveKit logs the failure, but don't crash.
+          res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
         }
       },

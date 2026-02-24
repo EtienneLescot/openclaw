@@ -52,13 +52,14 @@ OpenClaw Extension (@openclaw/stimm-voice)
 
 ## 3. Why Dual-Agent
 
-| Approach | Latency | Intelligence | Complexity |
-|----------|---------|-------------|------------|
-| Single large LLM on voice | High (~2-5s) | Full tools | Low |
-| Single small LLM on voice | Low (~0.5s) | Limited | Low |
+| Approach                   | Latency         | Intelligence   | Complexity |
+| -------------------------- | --------------- | -------------- | ---------- |
+| Single large LLM on voice  | High (~2-5s)    | Full tools     | Low        |
+| Single small LLM on voice  | Low (~0.5s)     | Limited        | Low        |
 | **Dual agent (this spec)** | **Low (~0.5s)** | **Full tools** | **Medium** |
 
 **Example flow:**
+
 > User: "Can you check my calendar for tomorrow and book a meeting with Sarah at 2pm?"
 > VoiceAgent (instant): "Sure, let me check your calendar for tomorrow."
 > Supervisor (background): [calls calendar tool, finds conflict at 2pm]
@@ -151,10 +152,10 @@ Both agents communicate via **LiveKit reliable data channel** (JSON, UTF-8). The
 
 ### 4.3 Voice Agent Modes
 
-| Mode | Behavior |
-|------|----------|
-| **autonomous** | Voice agent uses its own fast LLM. Default for greetings, small talk, clarifications. |
-| **relay** | Voice agent speaks exactly what the supervisor sends. |
+| Mode                 | Behavior                                                                                           |
+| -------------------- | -------------------------------------------------------------------------------------------------- |
+| **autonomous**       | Voice agent uses its own fast LLM. Default for greetings, small talk, clarifications.              |
+| **relay**            | Voice agent speaks exactly what the supervisor sends.                                              |
 | **hybrid** (default) | Voice agent responds autonomously but incorporates supervisor instructions into its next response. |
 
 ---
@@ -168,6 +169,7 @@ WhatsApp Business API does not support real-time voice calls. Only voice message
 ### Approach: Dual-Path
 
 **Path A — Enhanced Voice Message Loop (v1, stays in WhatsApp):**
+
 1. User sends voice note on WhatsApp
 2. OpenClaw extension sends audio to Stimm for STT transcription (one-shot)
 3. Transcript → OpenClaw main agent processes (tools, memory, reasoning)
@@ -175,6 +177,7 @@ WhatsApp Business API does not support real-time voice calls. Only voice message
 5. Fast turnaround (~2-3s), no link needed
 
 **Path B — Voice Link Handoff (v2, real-time):**
+
 1. User sends `/voice` or "let's talk" on WhatsApp
 2. OpenClaw replies with a link: `https://voice.openclaw.ai/room/abc123`
 3. Browser → WebRTC → LiveKit → full dual-agent real-time conversation
@@ -228,7 +231,7 @@ if __name__ == "__main__":
 ### src/supervisor.ts (core TypeScript logic):
 
 ```typescript
-import { StimmSupervisorClient, TranscriptMessage } from '@stimm/protocol';
+import { StimmSupervisorClient, TranscriptMessage } from "@stimm/protocol";
 
 export class OpenClawSupervisor {
   private client: StimmSupervisorClient;
@@ -243,7 +246,7 @@ export class OpenClawSupervisor {
       await this.client.instruct({
         text: result.text,
         speak: true,
-        priority: 'normal',
+        priority: "normal",
       });
     }
   }
@@ -281,6 +284,7 @@ export class OpenClawSupervisor {
 ## 8. Phased Rollout
 
 ### Phase 1: Web Voice (prove the architecture)
+
 - [ ] Stimm library v0.1 (VoiceAgent + Supervisor + Protocol + Room)
 - [ ] `@stimm/protocol` npm package
 - [ ] OpenClaw extension scaffold with Supervisor in TypeScript
@@ -288,11 +292,13 @@ export class OpenClawSupervisor {
 - [ ] Docker compose for LiveKit + voice agent
 
 ### Phase 2: WhatsApp Voice Enhancement
+
 - [ ] Path A: voice note loop (STT + agent + TTS → PTT reply)
 - [ ] Path B: voice link handoff
 - [ ] Session context bridging (WhatsApp thread ↔ voice room)
 
 ### Phase 3: Multi-Channel + Telephony
+
 - [ ] Telegram voice enhancement
 - [ ] SIP telephony via LiveKit SIP
 - [ ] Native app Talk Mode upgrade (iOS/Android/macOS)
