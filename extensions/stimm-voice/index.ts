@@ -230,6 +230,13 @@ const stimmVoicePlugin = {
       if (config.voiceAgent.stt.language) {
         env.STIMM_STT_LANGUAGE = config.voiceAgent.stt.language;
       }
+      if (config.voiceAgent.tts.language) {
+        env.STIMM_TTS_LANGUAGE = config.voiceAgent.tts.language;
+      }
+      // Temperature (optional).
+      if (config.voiceAgent.llm.temperature !== undefined) {
+        env.STIMM_LLM_TEMPERATURE = config.voiceAgent.llm.temperature.toString();
+      }
 
       agentProcess = new AgentProcess({
         pythonPath,
