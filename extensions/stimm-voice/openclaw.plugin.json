@@ -109,7 +109,11 @@
               "voice": {
                 "type": "string",
                 "default": "ash",
-                "description": "Voice name or ID (e.g. ash, rachel). Provider-dependent."
+                "description": "Voice selector. OpenAI: built-in voice name (e.g. ash). ElevenLabs: voice_id. Cartesia: voice UUID."
+              },
+              "language": {
+                "type": "string",
+                "description": "Language code (e.g. en, en-US). Provider-dependent."
               },
               "apiKey": {
                 "type": "string",
@@ -142,6 +146,10 @@
                 "type": "string",
                 "default": "gpt-4o-mini",
                 "description": "Model name for the LLM provider (e.g. gpt-4o-mini, claude-sonnet-4-20250514, gemini-2.0-flash)"
+              },
+              "temperature": {
+                "type": "number",
+                "description": "LLM temperature (0..2). Optional."
               },
               "apiKey": {
                 "type": "string",
@@ -284,7 +292,12 @@
     },
     "voiceAgent.tts.voice": {
       "label": "TTS Voice",
-      "help": "Voice name or ID (e.g. ash, rachel, alloy)"
+      "help": "OpenAI: voice name (ash, alloy). ElevenLabs: voice_id. Cartesia: voice UUID."
+    },
+    "voiceAgent.tts.language": {
+      "label": "TTS Language",
+      "advanced": true,
+      "help": "Language code (e.g. en, en-US). Provider-dependent."
     },
     "voiceAgent.tts.apiKey": {
       "label": "TTS API Key",
@@ -298,6 +311,11 @@
     "voiceAgent.llm.model": {
       "label": "LLM Model",
       "help": "Model name (e.g. gpt-4o-mini, claude-sonnet-4-20250514, gemini-2.0-flash)"
+    },
+    "voiceAgent.llm.temperature": {
+      "label": "LLM Temperature",
+      "advanced": true,
+      "help": "Sampling temperature (0..2)."
     },
     "voiceAgent.llm.apiKey": {
       "label": "LLM API Key",
