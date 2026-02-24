@@ -84,6 +84,8 @@ export const TtsConfigSchema = z.object({
   model: z.string().default("gpt-4o-mini-tts"),
   /** Voice name or ID. Provider-dependent (e.g. "ash", "rachel"). */
   voice: z.string().default("ash"),
+  /** Language code (e.g. "en", "fr"). Provider-dependent (useful for Cartesia, Google, etc.). */
+  language: z.string().optional(),
   /** API key for the TTS provider. Falls back to STIMM_TTS_API_KEY → provider-specific env. */
   apiKey: z.string().optional(),
 });
@@ -93,6 +95,8 @@ export const LlmConfigSchema = z.object({
   provider: z.enum(LLM_PROVIDERS).default("openai"),
   /** Model name (e.g. "gpt-4o-mini", "claude-sonnet-4-20250514", "gemini-2.0-flash"). */
   model: z.string().default("gpt-4o-mini"),
+  /** Temperature for the LLM generation. */
+  temperature: z.number().min(0).max(2).optional(),
   /** API key for the LLM provider. Falls back to STIMM_LLM_API_KEY → provider-specific env. */
   apiKey: z.string().optional(),
 });
