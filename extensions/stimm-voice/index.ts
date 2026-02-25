@@ -1142,7 +1142,7 @@ export default stimmVoicePlugin;
  * Thin LiveKit room lifecycle manager — creates rooms, generates tokens,
  * tracks active sessions. Supervisor logic lives in the Python agent.
  */
-class LiveKitRuntime {
+export class LiveKitRuntime {
   private sessions = new Map<string, VoiceSessionInternal>();
   private roomService: RoomServiceClient;
   private dispatchService: AgentDispatchClient;

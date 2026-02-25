@@ -1,12 +1,10 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
-import type { SupervisorDeps } from "./supervisor.js";
-
-// ---------------------------------------------------------------------------
-// Mock livekit-server-sdk — prevent real HTTP calls.
-// ---------------------------------------------------------------------------
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockCreateRoom = vi.fn(async () => ({}));
 const mockDeleteRoom = vi.fn(async () => {});
+const mockCreateDispatch = vi.fn(async () => ({}));
+const mockAddGrant = vi.fn();
+const mockToJwt = vi.fn(async () => "mock-jwt-token");
 
 vi.mock("livekit-server-sdk", () => {
   return {
@@ -15,97 +13,71 @@ vi.mock("livekit-server-sdk", () => {
       createRoom = mockCreateRoom;
       deleteRoom = mockDeleteRoom;
     },
+    AgentDispatchClient: class FakeDispatchClient {
+      constructor() {}
+      createDispatch = mockCreateDispatch;
+    },
     AccessToken: class FakeAccessToken {
       constructor() {}
-      addGrant() {}
+      addGrant(grant: unknown) {
+        mockAddGrant(grant);
+      }
       async toJwt() {
-        return "mock-jwt-token";
+        return mockToJwt();
       }
-    },
-    VideoGrant: class {},
-  };
-});
-
-// Mock node-supervisor-client (no LiveKit connection).
-vi.mock("./node-supervisor-client.js", () => {
-  return {
-    NodeSupervisorClient: class FakeClient {
-      _connected = false;
-      get connected() {
-        return this._connected;
-      }
-      async connect() {
-        this._connected = true;
-      }
-      async disconnect() {
-        this._connected = false;
-      }
-      on() {}
-      async instruct() {}
-      async addContext() {}
-      async sendActionResult() {}
-      async setMode() {}
     },
   };
 });
 
-// Import after mocks are set up.
-const { RoomManager } = await import("./room-manager.js");
+const { LiveKitRuntime } = await import("../index.ts");
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function createDeps(): SupervisorDeps {
-  return {
-    processMessage: vi.fn(async () => "ok"),
-    logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
-  };
-}
-
-function createManager(depsOverride?: Partial<SupervisorDeps>) {
-  const deps = { ...createDeps(), ...depsOverride };
-  return new RoomManager({
+function createRuntime() {
+  return new LiveKitRuntime({
+    enabled: true,
     livekit: { url: "ws://localhost:7880", apiKey: "devkey", apiSecret: "secret" },
     voiceAgent: {
       docker: true,
       image: "ghcr.io/stimm-ai/stimm-agent:latest",
-      stt: { provider: "deepgram" as const, model: "nova-2" },
-      tts: { provider: "openai" as const, model: "tts-1", voice: "alloy" },
+      stt: { provider: "deepgram", model: "nova-3" },
+      tts: { provider: "openai", model: "gpt-4o-mini-tts", voice: "ash" },
       llm: { provider: "openai", model: "gpt-4o-mini" },
-      bufferingLevel: "MEDIUM" as const,
-      mode: "hybrid" as const,
+      bufferingLevel: "MEDIUM",
+      mode: "hybrid",
       spawn: { autoSpawn: false, maxRestarts: 5 },
     },
-    supervisorDeps: deps,
+    web: { enabled: true, path: "/voice" },
+    access: {
+      mode: "none",
+      claimTtlSeconds: 120,
+      livekitTokenTtlSeconds: 300,
+      allowDirectWebSessionCreate: false,
+      claimRateLimitPerMinute: 20,
+    },
   });
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-describe("RoomManager", () => {
+describe("LiveKitRuntime", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
   describe("createSession", () => {
-    it("creates a LiveKit room and returns a session with token", async () => {
-      const rm = createManager();
-      const session = await rm.createSession({ originChannel: "web" });
+    it("creates a room, dispatches worker, and returns a tokenized session", async () => {
+      const runtime = createRuntime();
+      const session = await runtime.createSession({ originChannel: "web" });
 
       expect(mockCreateRoom).toHaveBeenCalled();
+      expect(mockCreateDispatch).toHaveBeenCalled();
+      expect(mockAddGrant).toHaveBeenCalled();
       expect(session.roomName).toMatch(/^stimm-/);
       expect(session.clientToken).toBe("mock-jwt-token");
       expect(session.originChannel).toBe("web");
       expect(session.createdAt).toBeGreaterThan(0);
-      expect(session.supervisor.connected).toBe(true);
     });
 
     it("uses a custom room name when provided", async () => {
-      const rm = createManager();
-      const session = await rm.createSession({
+      const runtime = createRuntime();
+      const session = await runtime.createSession({
         roomName: "my-custom-room",
         originChannel: "telegram",
       });
@@ -115,46 +87,46 @@ describe("RoomManager", () => {
     });
 
     it("stores the session for later retrieval", async () => {
-      const rm = createManager();
-      const session = await rm.createSession({
+      const runtime = createRuntime();
+      const session = await runtime.createSession({
         roomName: "lookupable",
         originChannel: "web",
       });
 
-      const found = rm.getSession("lookupable");
+      const found = runtime.getSession("lookupable");
       expect(found).toBeDefined();
       expect(found!.roomName).toBe(session.roomName);
     });
   });
 
   describe("endSession", () => {
-    it("disconnects supervisor, deletes room, and removes from map", async () => {
-      const rm = createManager();
-      const session = await rm.createSession({
+    it("deletes room and removes the session from map", async () => {
+      const runtime = createRuntime();
+      await runtime.createSession({
         roomName: "to-end",
         originChannel: "web",
       });
 
-      const ok = await rm.endSession("to-end");
+      const ok = await runtime.endSession("to-end");
       expect(ok).toBe(true);
       expect(mockDeleteRoom).toHaveBeenCalledWith("to-end");
-      expect(rm.getSession("to-end")).toBeUndefined();
+      expect(runtime.getSession("to-end")).toBeUndefined();
     });
 
     it("returns false for unknown room", async () => {
-      const rm = createManager();
-      const ok = await rm.endSession("nonexistent");
+      const runtime = createRuntime();
+      const ok = await runtime.endSession("nonexistent");
       expect(ok).toBe(false);
     });
   });
 
   describe("listSessions", () => {
     it("returns all active sessions", async () => {
-      const rm = createManager();
-      await rm.createSession({ roomName: "a", originChannel: "web" });
-      await rm.createSession({ roomName: "b", originChannel: "telegram" });
+      const runtime = createRuntime();
+      await runtime.createSession({ roomName: "a", originChannel: "web" });
+      await runtime.createSession({ roomName: "b", originChannel: "telegram" });
 
-      const list = rm.listSessions();
+      const list = runtime.listSessions();
       expect(list).toHaveLength(2);
       expect(list.map((s) => s.roomName).sort()).toEqual(["a", "b"]);
     });
@@ -162,20 +134,35 @@ describe("RoomManager", () => {
 
   describe("stopAll", () => {
     it("ends all sessions", async () => {
-      const rm = createManager();
-      await rm.createSession({ roomName: "x", originChannel: "web" });
-      await rm.createSession({ roomName: "y", originChannel: "web" });
+      const runtime = createRuntime();
+      await runtime.createSession({ roomName: "x", originChannel: "web" });
+      await runtime.createSession({ roomName: "y", originChannel: "web" });
 
-      await rm.stopAll();
-      expect(rm.listSessions()).toHaveLength(0);
+      await runtime.stopAll();
+      expect(runtime.listSessions()).toHaveLength(0);
       expect(mockDeleteRoom).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("issueClientToken", () => {
+    it("issues token for existing session", async () => {
+      const runtime = createRuntime();
+      await runtime.createSession({ roomName: "token-room", originChannel: "web" });
+
+      const token = await runtime.issueClientToken("token-room");
+      expect(token).toBe("mock-jwt-token");
+    });
+
+    it("throws when session is missing", async () => {
+      const runtime = createRuntime();
+      await expect(runtime.issueClientToken("missing-room")).rejects.toThrow("session not found");
     });
   });
 
   describe("getSession", () => {
     it("returns undefined for missing session", () => {
-      const rm = createManager();
-      expect(rm.getSession("nope")).toBeUndefined();
+      const runtime = createRuntime();
+      expect(runtime.getSession("nope")).toBeUndefined();
     });
   });
 });
