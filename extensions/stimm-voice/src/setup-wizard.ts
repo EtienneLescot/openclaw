@@ -11,9 +11,6 @@ import { join } from "node:path";
 import { AgentProcess } from "./agent-process.js";
 import {
   ACCESS_MODES,
-  LLM_PROVIDERS,
-  STT_PROVIDERS,
-  TTS_PROVIDERS,
   providerEnvVar,
   type AccessMode,
   type LlmProvider,
@@ -358,11 +355,6 @@ print(json.dumps({"extras": extras, "command": command}))
   }
 }
 
-function ensureWizardOptions(entries: Array<{ id: string; label: string }>, fallback: string[]) {
-  if (entries.length > 0) return entries;
-  return fallback.map((id) => ({ id, label: id }));
-}
-
 // ---------------------------------------------------------------------------
 // cloudflared helpers (Quick Tunnel).
 // ---------------------------------------------------------------------------
@@ -490,6 +482,19 @@ async function fetchJson(
   }
 }
 
+function getHttpStatusFromError(error: unknown): number | null {
+  if (!(error instanceof Error)) return null;
+  const match = error.message.match(/HTTP\s+(\d{3})/i);
+  if (!match) return null;
+  const status = Number(match[1]);
+  return Number.isFinite(status) ? status : null;
+}
+
+function isAuthError(error: unknown): boolean {
+  const status = getHttpStatusFromError(error);
+  return status === 401 || status === 403;
+}
+
 function getLiveKitDocsPluginUrl(lane: ModelLane, provider: string): string {
   return `https://docs.livekit.io/agents/models/${lane}/plugins/${provider}`;
 }
@@ -545,21 +550,6 @@ function extractLanguageLikeTokens(raw: string): string[] {
   return [...tokens];
 }
 
-async function fetchModelsFromLiveKitDocs(lane: ModelLane, provider: string): Promise<string[]> {
-  const url = getLiveKitDocsPluginUrl(lane, provider);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 10_000);
-  try {
-    const response = await fetch(url, { signal: controller.signal });
-    if (!response.ok) return [];
-    const html = await response.text();
-    const extracted = extractModelLikeTokens(html);
-    return uniq(extracted).slice(0, 80);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 async function fetchVoicesFromLiveKitDocs(lane: ModelLane, provider: string): Promise<string[]> {
   const url = getLiveKitDocsPluginUrl(lane, provider);
   const controller = new AbortController();
@@ -608,15 +598,30 @@ async function fetchOpenAICompatibleModels(params: {
  * Falls back to LiveKit docs scraping for providers that have no usable model catalog API.
  */
 async function fetchProviderModels(
-  lane: ModelLane,
+  _lane: ModelLane,
   entry: SttEntry | TtsEntry | LlmEntry,
   apiKey: string,
-): Promise<string[]> {
+): Promise<{ models: string[]; warning?: string }> {
+  const presets = uniq(entry.presets);
+  if (entry.api.kind === "livekit-docs") {
+    return {
+      models: presets,
+      warning: `${entry.label}: no live model API (docs-only provider). Showing preset/custom models only.`,
+    };
+  }
+
+  if (apiKey.trim().length === 0) {
+    return {
+      models: presets,
+      warning: `${entry.label}: missing API key. Showing preset/custom models only.`,
+    };
+  }
+
   const key = apiKey.trim();
-  if (!key) return [];
 
   const { api } = entry;
   let raw: string[] = [];
+  let authRejected = false;
 
   try {
     if (api.kind === "openai-compat") {
@@ -653,24 +658,52 @@ async function fetchProviderModels(
       }>;
       raw = uniq((json ?? []).map((item) => item.model_id ?? ""));
     } else if (api.kind === "deepgram") {
-      // Deepgram exposes no public model catalog; validate key via projects probe then return presets.
+      // Deepgram exposes no public model catalog.
+      // Keep a deterministic preset list and avoid docs scraping noise.
+      raw = [...entry.presets];
+
+      // Best-effort key validation via projects probe; never replace presets with scraped HTML.
       const probeUrl = api.probeUrl ?? "https://api.deepgram.com/v1/projects";
       const scheme = api.authScheme ?? "token";
       const authHeader = scheme === "token" ? `Token ${key}` : `Bearer ${key}`;
       const json = (await fetchJson(probeUrl, { headers: { Authorization: authHeader } })) as {
         projects?: unknown[];
       };
-      if (Array.isArray(json.projects)) raw = [...entry.presets];
+      if (!Array.isArray(json.projects)) raw = [...entry.presets];
     }
-  } catch {
-    raw = [];
+  } catch (error) {
+    authRejected = isAuthError(error);
+    return {
+      models: presets,
+      warning: authRejected
+        ? `${entry.label}: API key rejected (HTTP 401/403). Showing preset/custom models only.`
+        : `${entry.label}: unable to fetch live model list. Showing preset/custom models only.`,
+    };
   }
 
   const filtered = applyModelFilters(uniq(raw), api);
-  if (filtered.length > 0) return filtered;
+  if (filtered.length > 0) {
+    return {
+      models: filtered,
+      ...(authRejected
+        ? {
+            warning: `${entry.label}: API key rejected (HTTP 401/403). Showing preset models only.`,
+          }
+        : {}),
+    };
+  }
 
-  // Fallback: scrape LiveKit plugin docs when no catalog API is available.
-  return fetchModelsFromLiveKitDocs(lane, entry.id);
+  if (authRejected) {
+    return {
+      models: presets,
+      warning: `${entry.label}: API key rejected (HTTP 401/403). Showing only preset/custom models.`,
+    };
+  }
+
+  return {
+    models: presets,
+    warning: `${entry.label}: no live models returned. Showing preset/custom models only.`,
+  };
 }
 
 type ProviderCatalog = {
@@ -678,6 +711,7 @@ type ProviderCatalog = {
   voices: string[];
   voiceChoices?: Array<{ value: string; label: string }>;
   languages: string[];
+  modelWarning?: string;
 };
 
 /**
@@ -692,7 +726,8 @@ async function fetchProviderCatalog(
 ): Promise<ProviderCatalog> {
   const { api } = entry;
   const key = apiKey.trim();
-  const models = await fetchProviderModels(lane, entry, key);
+  const modelFetch = await fetchProviderModels(lane, entry, key);
+  const models = modelFetch.models;
   let voices: string[] = [];
   let voiceChoices: Array<{ value: string; label: string }> = [];
   let languages: string[] = [];
@@ -731,6 +766,7 @@ async function fetchProviderCatalog(
     voices: uniq(voices),
     ...(voiceChoices.length > 0 ? { voiceChoices } : {}),
     languages: uniq(languages),
+    ...(modelFetch.warning ? { modelWarning: modelFetch.warning } : {}),
   };
 }
 
@@ -759,10 +795,14 @@ async function promptModelWithChoices(params: {
 }): Promise<string | symbol> {
   const { c, message, initialValue, placeholder } = params;
   const currentOptions = uniq(params.options);
+  const formatModelLabel = (value: string): string => {
+    if (value === "default") return "Use provider default";
+    return value;
+  };
   const modelChoice = (await c.select({
     message,
     options: [
-      ...currentOptions.map((value) => ({ value, label: value })),
+      ...currentOptions.map((value) => ({ value, label: formatModelLabel(value) })),
       { value: "__custom__", label: "Custom model…" },
     ],
     initialValue: currentOptions.includes(initialValue) ? initialValue : "__custom__",
@@ -864,17 +904,14 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
 
   await c.log.step("Loading provider catalog/runtime contract from stimm APIs...");
   const providerData = loadStimmProviderData(deps.extensionDir);
-  const catalog = providerData?.catalog ?? null;
-  const runtimeProviders = providerData?.runtime ?? { stt: [], tts: [], llm: [] };
-  const runtimeSttIds = new Set(runtimeProviders.stt);
-  const runtimeTtsIds = new Set(runtimeProviders.tts);
-  const runtimeLlmIds = new Set(runtimeProviders.llm);
-
   if (!providerData) {
-    await c.log.warn(
-      "Could not load stimm provider APIs (get_provider_catalog/list_runtime_providers). Falling back to built-in provider IDs.",
+    await c.log.error(
+      "Unable to load stimm provider APIs (get_provider_catalog/list_runtime_providers). Install/update stimm in the runtime environment, then rerun setup.",
     );
+    return c.outro("Setup cancelled.");
   }
+
+  const catalog = providerData.catalog;
 
   // Catalog accessor helpers
   const sttMeta = (id: string): SttEntry =>
@@ -953,13 +990,7 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
   let sttLanguage: string = "";
   let sttApiKey: string = "";
 
-  let hasSttConfig = !!(existing.stt?.provider && existing.stt?.model);
-  if (hasSttConfig && runtimeSttIds.size > 0 && !runtimeSttIds.has(existing.stt!.provider!)) {
-    hasSttConfig = false;
-    await c.log.warn(
-      `Existing STT provider \`${existing.stt!.provider}\` is not runtime-supported by current Stimm setup; reconfiguration required.`,
-    );
-  }
+  const hasSttConfig = !!(existing.stt?.provider && existing.stt?.model);
 
   if (hasSttConfig) {
     await c.log.info(
@@ -980,15 +1011,16 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
   }
 
   if (!hasSttConfig || !sttModel) {
-    const sttCatalogEntries =
-      catalog?.stt.filter((entry) => runtimeSttIds.size === 0 || runtimeSttIds.has(entry.id)) ?? [];
-    const sttEntries = ensureWizardOptions(
-      sttCatalogEntries.map(({ id, label }) => ({ id, label })),
-      [...STT_PROVIDERS],
-    );
+    const sttCatalogEntries = catalog.stt;
+    if (sttCatalogEntries.length === 0) {
+      await c.log.error("No STT provider found in stimm provider catalog.");
+      return c.outro("Setup cancelled.");
+    }
+    const sttEntries = sttCatalogEntries.map(({ id, label }) => ({ id, label }));
+    const existingSttProvider = existing.stt?.provider;
     const sttInitial =
-      existing.stt?.provider && sttEntries.some((entry) => entry.id === existing.stt.provider)
-        ? existing.stt.provider
+      existingSttProvider && sttEntries.some((entry) => entry.id === existingSttProvider)
+        ? existingSttProvider
         : sttEntries[0]?.id;
     const sttProviderResult = (await c.select({
       message: "Speech-to-Text provider",
@@ -1031,6 +1063,9 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
 
     await c.log.step(`Fetching available STT models/languages for ${sttEntry.label}...`);
     const sttLiveCatalog = await fetchProviderCatalog("stt", sttEntry, sttApiKey);
+    if (sttLiveCatalog.modelWarning) {
+      await c.log.warn(sttLiveCatalog.modelWarning);
+    }
 
     const sttModelResult = await promptModelWithChoices({
       c,
@@ -1065,13 +1100,7 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
   let ttsLanguage: string = "";
   let ttsApiKey: string = "";
 
-  let hasTtsConfig = !!(existing.tts?.provider && existing.tts?.model);
-  if (hasTtsConfig && runtimeTtsIds.size > 0 && !runtimeTtsIds.has(existing.tts!.provider!)) {
-    hasTtsConfig = false;
-    await c.log.warn(
-      `Existing TTS provider \`${existing.tts!.provider}\` is not runtime-supported by current Stimm setup; reconfiguration required.`,
-    );
-  }
+  const hasTtsConfig = !!(existing.tts?.provider && existing.tts?.model);
 
   if (hasTtsConfig) {
     await c.log.info(
@@ -1093,15 +1122,16 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
   }
 
   if (!hasTtsConfig || !ttsModel) {
-    const ttsCatalogEntries =
-      catalog?.tts.filter((entry) => runtimeTtsIds.size === 0 || runtimeTtsIds.has(entry.id)) ?? [];
-    const ttsEntries = ensureWizardOptions(
-      ttsCatalogEntries.map(({ id, label }) => ({ id, label })),
-      [...TTS_PROVIDERS],
-    );
+    const ttsCatalogEntries = catalog.tts;
+    if (ttsCatalogEntries.length === 0) {
+      await c.log.error("No TTS provider found in stimm provider catalog.");
+      return c.outro("Setup cancelled.");
+    }
+    const ttsEntries = ttsCatalogEntries.map(({ id, label }) => ({ id, label }));
+    const existingTtsProvider = existing.tts?.provider;
     const ttsInitial =
-      existing.tts?.provider && ttsEntries.some((entry) => entry.id === existing.tts.provider)
-        ? existing.tts.provider
+      existingTtsProvider && ttsEntries.some((entry) => entry.id === existingTtsProvider)
+        ? existingTtsProvider
         : ttsEntries[0]?.id;
     const ttsProviderResult = (await c.select({
       message: "Text-to-Speech provider",
@@ -1156,6 +1186,9 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
 
     await c.log.step(`Fetching available TTS models/voices/languages for ${ttsEntry.label}...`);
     const ttsLiveCatalog = await fetchProviderCatalog("tts", ttsEntry, ttsApiKey);
+    if (ttsLiveCatalog.modelWarning) {
+      await c.log.warn(ttsLiveCatalog.modelWarning);
+    }
 
     const ttsModelResult = await promptModelWithChoices({
       c,
@@ -1213,13 +1246,7 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
   let llmModel!: string;
   let llmApiKey: string = "";
 
-  let hasLlmConfig = !!(existing.llm?.provider && existing.llm?.model);
-  if (hasLlmConfig && runtimeLlmIds.size > 0 && !runtimeLlmIds.has(existing.llm!.provider!)) {
-    hasLlmConfig = false;
-    await c.log.warn(
-      `Existing LLM provider \`${existing.llm!.provider}\` is not runtime-supported by current Stimm setup; reconfiguration required.`,
-    );
-  }
+  const hasLlmConfig = !!(existing.llm?.provider && existing.llm?.model);
 
   if (hasLlmConfig) {
     await c.log.info(`  Current LLM: ${existing.llm!.provider} / ${existing.llm!.model}`);
@@ -1236,15 +1263,16 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
   }
 
   if (!hasLlmConfig || !llmModel) {
-    const llmCatalogEntries =
-      catalog?.llm.filter((entry) => runtimeLlmIds.size === 0 || runtimeLlmIds.has(entry.id)) ?? [];
-    const llmEntries = ensureWizardOptions(
-      llmCatalogEntries.map(({ id, label }) => ({ id, label })),
-      [...LLM_PROVIDERS],
-    );
+    const llmCatalogEntries = catalog.llm;
+    if (llmCatalogEntries.length === 0) {
+      await c.log.error("No LLM provider found in stimm provider catalog.");
+      return c.outro("Setup cancelled.");
+    }
+    const llmEntries = llmCatalogEntries.map(({ id, label }) => ({ id, label }));
+    const existingLlmProvider = existing.llm?.provider;
     const llmInitial =
-      existing.llm?.provider && llmEntries.some((entry) => entry.id === existing.llm.provider)
-        ? existing.llm.provider
+      existingLlmProvider && llmEntries.some((entry) => entry.id === existingLlmProvider)
+        ? existingLlmProvider
         : llmEntries[0]?.id;
     const llmProviderResult = (await c.select({
       message: "LLM provider (for voice agent reasoning)",
@@ -1302,6 +1330,9 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
 
     await c.log.step(`Fetching available LLM models for ${llmEntry.label}...`);
     const llmLiveCatalog = await fetchProviderCatalog("llm", llmEntry, llmApiKey);
+    if (llmLiveCatalog.modelWarning) {
+      await c.log.warn(llmLiveCatalog.modelWarning);
+    }
 
     const llmModelResult = await promptModelWithChoices({
       c,
