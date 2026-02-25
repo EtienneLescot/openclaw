@@ -155,6 +155,12 @@ class OpenClawSupervisor(ConversationSupervisor):
     async def _post_to_openclaw(self, *, history: str, system_prompt: str | None) -> str:
         """POST payload to the OpenClaw /stimm/supervisor endpoint."""
         try:
+            timeout_s_raw = os.environ.get("OPENCLAW_SUPERVISOR_TIMEOUT_S", "120").strip()
+            try:
+                timeout_s = max(5.0, float(timeout_s_raw))
+            except ValueError:
+                timeout_s = 120.0
+
             async with aiohttp.ClientSession() as http:
                 async with http.post(
                     self.supervisor_url,
@@ -169,7 +175,7 @@ class OpenClawSupervisor(ConversationSupervisor):
                             "OPENCLAW_SUPERVISOR_SECRET", ""
                         )
                     },
-                    timeout=aiohttp.ClientTimeout(total=30),
+                    timeout=aiohttp.ClientTimeout(total=timeout_s),
                 ) as resp:
                     data = await resp.json()
                     if resp.status != 200:
@@ -186,7 +192,11 @@ class OpenClawSupervisor(ConversationSupervisor):
                         logger.info("OpenClaw supervisor returned context: %s", text)
                     return text
         except Exception as exc:
-            logger.error("OpenClaw supervisor HTTP call failed: %s", exc)
+            logger.error(
+                "OpenClaw supervisor HTTP call failed (%s): %r",
+                type(exc).__name__,
+                exc,
+            )
             return self.NO_ACTION
 
 
