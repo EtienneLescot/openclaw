@@ -38,6 +38,11 @@ pnpm install
 
 Then restart the OpenClaw gateway.
 
+Python dependencies use Stimm extras as the single installation contract:
+
+- Base/default profile from [python/requirements.txt](python/requirements.txt): `stimm[deepgram,openai]`
+- Additional provider plugins are installed by the setup wizard based on selected STT/TTS/LLM providers (`stimm[...]`).
+
 ## Config
 
 Set config under `plugins.entries.stimm-voice.config`.

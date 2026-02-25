@@ -8,8 +8,12 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { AgentProcess } from "./agent-process.js";
 import {
   ACCESS_MODES,
+  LLM_PROVIDERS,
+  STT_PROVIDERS,
+  TTS_PROVIDERS,
   providerEnvVar,
   type AccessMode,
   type LlmProvider,
@@ -140,58 +144,223 @@ type StimmProviders = {
   llm: LlmEntry[];
 };
 
-/**
- * Load providers.json from stimm (source of truth for provider metadata).
- * Tries, in order:
- *  1. Installed stimm package inside the extension Python venv (normal path — stimm is a dep).
- *  2. Sibling stimm repo on disk (dev workflow, before the venv is initialised).
- * Returns null only if the venv isn't set up yet and no sibling repo is found.
- */
-function loadStimmProviders(extensionDir: string): StimmProviders | null {
-  // 1. Python venv — stimm is a declared dependency, so providers.json lives inside it.
-  const pythonExe = join(extensionDir, "python", ".venv", "bin", "python");
-  if (existsSync(pythonExe)) {
-    try {
-      const result = spawnSync(
-        pythonExe,
-        [
-          "-c",
-          "import stimm, os; print(os.path.join(os.path.dirname(stimm.__file__), 'providers.json'))",
-        ],
-        { encoding: "utf8", timeout: 5_000 },
-      );
-      if (result.status === 0) {
-        const jsonPath = result.stdout.trim();
-        if (existsSync(jsonPath)) {
-          return JSON.parse(readFileSync(jsonPath, "utf-8")) as StimmProviders;
-        }
+type RuntimeProviders = {
+  stt: string[];
+  tts: string[];
+  llm: string[];
+};
+
+type StimmProviderData = {
+  catalog: StimmProviders;
+  runtime: RuntimeProviders;
+};
+
+type ProviderSelection = {
+  stt: string;
+  tts: string;
+  llm: string;
+};
+
+type ExtrasResolution = {
+  extras: string[];
+  command: string;
+};
+
+function normalizeProviderEntry(kind: ModelLane, value: unknown): SttEntry | TtsEntry | LlmEntry {
+  const record =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  const id = typeof record.id === "string" && record.id.trim().length > 0 ? record.id : "unknown";
+  const label =
+    typeof record.label === "string" && record.label.trim().length > 0 ? record.label : id;
+  const defaultModel =
+    typeof record.defaultModel === "string" && record.defaultModel.trim().length > 0
+      ? record.defaultModel
+      : "default";
+  const presets = Array.isArray(record.presets)
+    ? record.presets.filter((item): item is string => typeof item === "string")
+    : [];
+  const apiRecord =
+    record.api && typeof record.api === "object" && !Array.isArray(record.api)
+      ? (record.api as Record<string, unknown>)
+      : {};
+  const api: ProviderApiConf = {
+    kind:
+      typeof apiRecord.kind === "string" && apiRecord.kind.trim().length > 0
+        ? apiRecord.kind
+        : "livekit-docs",
+    ...(typeof apiRecord.baseUrl === "string" ? { baseUrl: apiRecord.baseUrl } : {}),
+    ...(typeof apiRecord.modelsUrl === "string" ? { modelsUrl: apiRecord.modelsUrl } : {}),
+    ...(typeof apiRecord.voicesUrl === "string" ? { voicesUrl: apiRecord.voicesUrl } : {}),
+    ...(typeof apiRecord.probeUrl === "string" ? { probeUrl: apiRecord.probeUrl } : {}),
+    ...(typeof apiRecord.authScheme === "string" ? { authScheme: apiRecord.authScheme } : {}),
+    ...(typeof apiRecord.authHeader === "string" ? { authHeader: apiRecord.authHeader } : {}),
+    ...(typeof apiRecord.apiVersion === "string" ? { apiVersion: apiRecord.apiVersion } : {}),
+    ...(typeof apiRecord.includeFilter === "string"
+      ? { includeFilter: apiRecord.includeFilter }
+      : {}),
+    ...(typeof apiRecord.excludeFilter === "string"
+      ? { excludeFilter: apiRecord.excludeFilter }
+      : {}),
+  };
+
+  if (kind === "tts") {
+    return {
+      id,
+      label,
+      defaultModel,
+      defaultVoice:
+        typeof record.defaultVoice === "string" && record.defaultVoice.trim().length > 0
+          ? record.defaultVoice
+          : "default",
+      presets,
+      api,
+    } satisfies TtsEntry;
+  }
+
+  if (kind === "stt") {
+    return {
+      id,
+      label,
+      defaultModel,
+      presets,
+      api,
+    } satisfies SttEntry;
+  }
+
+  return {
+    id,
+    label,
+    defaultModel,
+    presets,
+    api,
+  } satisfies LlmEntry;
+}
+
+function normalizeCatalog(value: unknown): StimmProviders {
+  const record =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  const stt = Array.isArray(record.stt)
+    ? record.stt.map((entry) => normalizeProviderEntry("stt", entry) as SttEntry)
+    : [];
+  const tts = Array.isArray(record.tts)
+    ? record.tts.map((entry) => normalizeProviderEntry("tts", entry) as TtsEntry)
+    : [];
+  const llm = Array.isArray(record.llm)
+    ? record.llm.map((entry) => normalizeProviderEntry("llm", entry) as LlmEntry)
+    : [];
+  return { stt, tts, llm };
+}
+
+function normalizeRuntimeIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => {
+      if (typeof entry === "string") return entry;
+      if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+        const id = (entry as Record<string, unknown>).id;
+        return typeof id === "string" ? id : "";
       }
-    } catch {
-      /* fall through */
-    }
-  }
+      return "";
+    })
+    .filter((id) => id.length > 0);
+}
 
-  // 2. Sibling stimm repo on disk (dev workflow — venv not yet initialised).
-  // extensionDir = .../openclaw/extensions/stimm-voice  →  ../../../stimm
-  const siblingPath = join(
-    extensionDir,
-    "..",
-    "..",
-    "..",
-    "stimm",
-    "src",
-    "stimm",
-    "providers.json",
-  );
-  if (existsSync(siblingPath)) {
-    try {
-      return JSON.parse(readFileSync(siblingPath, "utf-8")) as StimmProviders;
-    } catch {
-      /* fall through */
-    }
-  }
+function findPythonForWizard(extensionDir: string): string | null {
+  const venvPython = join(extensionDir, "python", ".venv", "bin", "python");
+  if (existsSync(venvPython)) return venvPython;
+  const system = AgentProcess.findSystemPython();
+  return system ?? null;
+}
 
-  return null;
+function loadStimmProviderData(extensionDir: string): StimmProviderData | null {
+  const pythonExe = findPythonForWizard(extensionDir);
+  if (!pythonExe) return null;
+
+  const script = `
+import json
+from stimm import get_provider_catalog, list_runtime_providers
+
+catalog = get_provider_catalog()
+runtime = {
+    "stt": list_runtime_providers("stt"),
+    "tts": list_runtime_providers("tts"),
+    "llm": list_runtime_providers("llm"),
+}
+
+print(json.dumps({"catalog": catalog, "runtime": runtime}))
+`;
+
+  try {
+    const result = spawnSync(pythonExe, ["-c", script], {
+      encoding: "utf8",
+      timeout: 8_000,
+    });
+    if (result.status !== 0) return null;
+    const parsed = JSON.parse(result.stdout) as Record<string, unknown>;
+    const runtimeRecord =
+      parsed.runtime && typeof parsed.runtime === "object" && !Array.isArray(parsed.runtime)
+        ? (parsed.runtime as Record<string, unknown>)
+        : {};
+    return {
+      catalog: normalizeCatalog(parsed.catalog),
+      runtime: {
+        stt: normalizeRuntimeIds(runtimeRecord.stt),
+        tts: normalizeRuntimeIds(runtimeRecord.tts),
+        llm: normalizeRuntimeIds(runtimeRecord.llm),
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+function resolveStimmExtras(
+  pythonExe: string,
+  selection: ProviderSelection,
+): ExtrasResolution | null {
+  const script = `
+import json
+from stimm import required_extras_for_selection, extras_install_command
+
+selection = json.loads(${JSON.stringify(JSON.stringify(selection))})
+extras = required_extras_for_selection(
+    stt=selection.get("stt"),
+    tts=selection.get("tts"),
+    llm=selection.get("llm"),
+)
+command = extras_install_command(
+    stt=selection.get("stt"),
+    tts=selection.get("tts"),
+    llm=selection.get("llm"),
+)
+
+print(json.dumps({"extras": extras, "command": command}))
+`;
+
+  try {
+    const result = spawnSync(pythonExe, ["-c", script], {
+      encoding: "utf8",
+      timeout: 8_000,
+    });
+    if (result.status !== 0) return null;
+    const parsed = JSON.parse(result.stdout) as Record<string, unknown>;
+    const extras = Array.isArray(parsed.extras)
+      ? parsed.extras.filter((item): item is string => typeof item === "string")
+      : [];
+    const command = typeof parsed.command === "string" ? parsed.command : "";
+    return { extras, command };
+  } catch {
+    return null;
+  }
+}
+
+function ensureWizardOptions(entries: Array<{ id: string; label: string }>, fallback: string[]) {
+  if (entries.length > 0) return entries;
+  return fallback.map((id) => ({ id, label: id }));
 }
 
 // ---------------------------------------------------------------------------
@@ -693,12 +862,17 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
 
   // -- Load provider catalog from stimm (source of truth) -----------------
 
-  await c.log.step("Loading provider catalog from stimm...");
-  const catalog = loadStimmProviders(deps.extensionDir);
-  if (!catalog) {
+  await c.log.step("Loading provider catalog/runtime contract from stimm APIs...");
+  const providerData = loadStimmProviderData(deps.extensionDir);
+  const catalog = providerData?.catalog ?? null;
+  const runtimeProviders = providerData?.runtime ?? { stt: [], tts: [], llm: [] };
+  const runtimeSttIds = new Set(runtimeProviders.stt);
+  const runtimeTtsIds = new Set(runtimeProviders.tts);
+  const runtimeLlmIds = new Set(runtimeProviders.llm);
+
+  if (!providerData) {
     await c.log.warn(
-      "Could not load providers.json from stimm (venv not ready, sibling repo not found, and GitHub fetch failed). " +
-        "Provider lists will be empty — you can still type values manually.",
+      "Could not load stimm provider APIs (get_provider_catalog/list_runtime_providers). Falling back to built-in provider IDs.",
     );
   }
 
@@ -779,7 +953,13 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
   let sttLanguage: string = "";
   let sttApiKey: string = "";
 
-  const hasSttConfig = !!(existing.stt?.provider && existing.stt?.model);
+  let hasSttConfig = !!(existing.stt?.provider && existing.stt?.model);
+  if (hasSttConfig && runtimeSttIds.size > 0 && !runtimeSttIds.has(existing.stt!.provider!)) {
+    hasSttConfig = false;
+    await c.log.warn(
+      `Existing STT provider \`${existing.stt!.provider}\` is not runtime-supported by current Stimm setup; reconfiguration required.`,
+    );
+  }
 
   if (hasSttConfig) {
     await c.log.info(
@@ -800,7 +980,16 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
   }
 
   if (!hasSttConfig || !sttModel) {
-    const sttEntries = catalog?.stt ?? [];
+    const sttCatalogEntries =
+      catalog?.stt.filter((entry) => runtimeSttIds.size === 0 || runtimeSttIds.has(entry.id)) ?? [];
+    const sttEntries = ensureWizardOptions(
+      sttCatalogEntries.map(({ id, label }) => ({ id, label })),
+      [...STT_PROVIDERS],
+    );
+    const sttInitial =
+      existing.stt?.provider && sttEntries.some((entry) => entry.id === existing.stt.provider)
+        ? existing.stt.provider
+        : sttEntries[0]?.id;
     const sttProviderResult = (await c.select({
       message: "Speech-to-Text provider",
       options: sttEntries.map(({ id, label }) => ({
@@ -808,7 +997,7 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
         label,
         hint: providerEnvVar(id as SttProvider) ?? "",
       })),
-      initialValue: existing.stt?.provider ?? "deepgram",
+      initialValue: sttInitial,
     })) as SttProvider | symbol;
     if (isCancel(sttProviderResult)) return c.outro("Setup cancelled.");
     sttProvider = sttProviderResult;
@@ -876,7 +1065,13 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
   let ttsLanguage: string = "";
   let ttsApiKey: string = "";
 
-  const hasTtsConfig = !!(existing.tts?.provider && existing.tts?.model);
+  let hasTtsConfig = !!(existing.tts?.provider && existing.tts?.model);
+  if (hasTtsConfig && runtimeTtsIds.size > 0 && !runtimeTtsIds.has(existing.tts!.provider!)) {
+    hasTtsConfig = false;
+    await c.log.warn(
+      `Existing TTS provider \`${existing.tts!.provider}\` is not runtime-supported by current Stimm setup; reconfiguration required.`,
+    );
+  }
 
   if (hasTtsConfig) {
     await c.log.info(
@@ -898,7 +1093,16 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
   }
 
   if (!hasTtsConfig || !ttsModel) {
-    const ttsEntries = catalog?.tts ?? [];
+    const ttsCatalogEntries =
+      catalog?.tts.filter((entry) => runtimeTtsIds.size === 0 || runtimeTtsIds.has(entry.id)) ?? [];
+    const ttsEntries = ensureWizardOptions(
+      ttsCatalogEntries.map(({ id, label }) => ({ id, label })),
+      [...TTS_PROVIDERS],
+    );
+    const ttsInitial =
+      existing.tts?.provider && ttsEntries.some((entry) => entry.id === existing.tts.provider)
+        ? existing.tts.provider
+        : ttsEntries[0]?.id;
     const ttsProviderResult = (await c.select({
       message: "Text-to-Speech provider",
       options: ttsEntries.map(({ id, label }) => ({
@@ -906,7 +1110,7 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
         label,
         hint: providerEnvVar(id as TtsProvider) ?? "",
       })),
-      initialValue: existing.tts?.provider ?? "openai",
+      initialValue: ttsInitial,
     })) as TtsProvider | symbol;
     if (isCancel(ttsProviderResult)) return c.outro("Setup cancelled.");
     ttsProvider = ttsProviderResult;
@@ -1009,7 +1213,13 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
   let llmModel!: string;
   let llmApiKey: string = "";
 
-  const hasLlmConfig = !!(existing.llm?.provider && existing.llm?.model);
+  let hasLlmConfig = !!(existing.llm?.provider && existing.llm?.model);
+  if (hasLlmConfig && runtimeLlmIds.size > 0 && !runtimeLlmIds.has(existing.llm!.provider!)) {
+    hasLlmConfig = false;
+    await c.log.warn(
+      `Existing LLM provider \`${existing.llm!.provider}\` is not runtime-supported by current Stimm setup; reconfiguration required.`,
+    );
+  }
 
   if (hasLlmConfig) {
     await c.log.info(`  Current LLM: ${existing.llm!.provider} / ${existing.llm!.model}`);
@@ -1026,7 +1236,16 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
   }
 
   if (!hasLlmConfig || !llmModel) {
-    const llmEntries = catalog?.llm ?? [];
+    const llmCatalogEntries =
+      catalog?.llm.filter((entry) => runtimeLlmIds.size === 0 || runtimeLlmIds.has(entry.id)) ?? [];
+    const llmEntries = ensureWizardOptions(
+      llmCatalogEntries.map(({ id, label }) => ({ id, label })),
+      [...LLM_PROVIDERS],
+    );
+    const llmInitial =
+      existing.llm?.provider && llmEntries.some((entry) => entry.id === existing.llm.provider)
+        ? existing.llm.provider
+        : llmEntries[0]?.id;
     const llmProviderResult = (await c.select({
       message: "LLM provider (for voice agent reasoning)",
       options: llmEntries.map(({ id, label }) => ({
@@ -1034,7 +1253,7 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
         label,
         hint: providerEnvVar(id as LlmProvider) ?? "",
       })),
-      initialValue: existing.llm?.provider ?? "openai",
+      initialValue: llmInitial,
     })) as LlmProvider | symbol;
     if (isCancel(llmProviderResult)) return c.outro("Setup cancelled.");
     llmProvider = llmProviderResult;
@@ -1168,6 +1387,78 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
     placeholder: "leave blank to use env fallback",
   })) as string | symbol;
   if (isCancel(supervisorSecret)) return c.outro("Setup cancelled.");
+
+  // -- Install selected Stimm extras -------------------------------------
+
+  const pythonDir = join(deps.extensionDir, "python");
+  let extrasInstalled = false;
+  let pythonExe = join(pythonDir, ".venv", "bin", "python");
+  if (!existsSync(pythonExe)) {
+    const createVenvNow = await c.confirm({
+      message: "Python venv not found. Create it now to install selected Stimm extras?",
+      initialValue: true,
+    });
+    if (isCancel(createVenvNow)) return c.outro("Setup cancelled.");
+    if (createVenvNow) {
+      const ok = AgentProcess.ensureVenv(pythonDir, {
+        info: (message) => deps.logger.info(message),
+        warn: (message) => deps.logger.info(message),
+        error: (message) => deps.logger.error(message),
+      });
+      if (!ok) {
+        await c.log.warn(
+          "Could not create Python venv automatically. Provider extras installation is skipped for now.",
+        );
+      }
+    }
+  }
+
+  pythonExe = existsSync(pythonExe) ? pythonExe : (findPythonForWizard(deps.extensionDir) ?? "");
+  if (pythonExe) {
+    const extrasResolution = resolveStimmExtras(pythonExe, {
+      stt: sttProvider,
+      tts: ttsProvider,
+      llm: llmProvider,
+    });
+    if (!extrasResolution) {
+      await c.log.warn(
+        "Could not resolve required extras via stimm.required_extras_for_selection(); skipping extras install step.",
+      );
+    } else if (extrasResolution.extras.length === 0) {
+      await c.log.info("No additional Stimm extras are required for the selected providers.");
+    } else {
+      await c.log.step(`Installing Stimm extras: ${extrasResolution.extras.join(", ")}...`);
+      const install = spawnSync(
+        pythonExe,
+        ["-m", "pip", "install", `stimm[${extrasResolution.extras.join(",")}]`],
+        {
+          stdio: "inherit",
+          timeout: 300_000,
+        },
+      );
+      if (install.status === 0) {
+        extrasInstalled = true;
+        await c.log.success(
+          `Stimm extras installed (${extrasResolution.command || "pip install"}).`,
+        );
+      } else {
+        await c.log.warn(
+          "Stimm extras install failed. You can retry manually with: " +
+            (extrasResolution.command || `pip install stimm[${extrasResolution.extras.join(",")}]`),
+        );
+      }
+    }
+  } else {
+    await c.log.warn(
+      "No Python interpreter found to resolve/install provider extras. Install Python 3.10+ and rerun setup.",
+    );
+  }
+
+  if (extrasInstalled) {
+    await c.log.info(
+      "Python dependencies changed. Restart the OpenClaw gateway/app process before starting a voice session.",
+    );
+  }
 
   // -- Save ---------------------------------------------------------------
 
