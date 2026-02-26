@@ -13,6 +13,117 @@ import { execSync, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
+const OBS_JSON_MARKER = "OBS_JSON ";
+
+type SupervisorObsEvent = {
+  component: string;
+  event: string;
+  inference_seq?: number;
+  history_len?: number;
+  processed_up_to?: number;
+  latency_ms?: number;
+  structured_json?: boolean;
+  action?: string;
+  reason?: string;
+  text_chars?: number;
+  preview?: string;
+};
+
+function maybeReadNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function maybeReadString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function maybeReadBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function truncate(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength)}…`;
+}
+
+function parseSupervisorObsEvent(line: string): SupervisorObsEvent | null {
+  const markerIndex = line.indexOf(OBS_JSON_MARKER);
+  if (markerIndex === -1) return null;
+  const payload = line.slice(markerIndex + OBS_JSON_MARKER.length).trim();
+  if (!payload.startsWith("{")) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+
+  const record = parsed as Record<string, unknown>;
+  const component = maybeReadString(record.component);
+  const event = maybeReadString(record.event);
+  if (component !== "conversation_supervisor" || !event) return null;
+
+  return {
+    component,
+    event,
+    inference_seq: maybeReadNumber(record.inference_seq),
+    history_len: maybeReadNumber(record.history_len),
+    processed_up_to: maybeReadNumber(record.processed_up_to),
+    latency_ms: maybeReadNumber(record.latency_ms),
+    structured_json: maybeReadBoolean(record.structured_json),
+    action: maybeReadString(record.action),
+    reason: maybeReadString(record.reason),
+    text_chars: maybeReadNumber(record.text_chars),
+    preview: maybeReadString(record.preview),
+  };
+}
+
+function formatSupervisorObsEvent(event: SupervisorObsEvent): string {
+  const seq = event.inference_seq ?? "?";
+
+  if (event.event === "inference_started") {
+    return (
+      `[stimm-voice:supervisor] #${seq} inference_started ` +
+      `history_len=${event.history_len ?? "?"} processed_up_to=${event.processed_up_to ?? "?"}`
+    );
+  }
+
+  if (event.event === "inference_completed") {
+    const structured = event.structured_json === true ? "yes" : "no";
+    const action = event.action ?? "n/a";
+    const reason = event.reason && event.reason.trim() ? truncate(event.reason.trim(), 220) : "n/a";
+    return (
+      `[stimm-voice:supervisor] #${seq} inference_completed ` +
+      `latency_ms=${event.latency_ms ?? "?"} structured_json=${structured} action=${action} reason=${reason}`
+    );
+  }
+
+  if (event.event === "trigger_sent") {
+    const preview =
+      event.preview && event.preview.trim() ? truncate(event.preview.trim(), 160) : "";
+    return (
+      `[stimm-voice:supervisor] #${seq} trigger_sent ` +
+      `text_chars=${event.text_chars ?? "?"}${preview ? ` preview=\"${preview}\"` : ""}`
+    );
+  }
+
+  if (event.event === "no_action") {
+    return `[stimm-voice:supervisor] #${seq} no_action`;
+  }
+
+  return `[stimm-voice:supervisor] #${seq} event=${event.event}`;
+}
+
+function shouldSuppressAgentLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (line.includes("ignoring text stream with topic")) return true;
+  if (line.includes("'lk.transcription'")) return true;
+  if (trimmed === "attached") return true;
+  return false;
+}
+
 export interface AgentProcessOptions {
   /** Path to the Python executable (in the venv). */
   pythonPath: string;
@@ -115,6 +226,14 @@ export class AgentProcess {
 
       const forwardLine = (line: string) => {
         logStream.write(line + "\n");
+        if (shouldSuppressAgentLine(line)) {
+          return;
+        }
+        const supervisorEvent = parseSupervisorObsEvent(line);
+        if (supervisorEvent) {
+          logger.info(formatSupervisorObsEvent(supervisorEvent));
+          return;
+        }
         logger.info(`[stimm-voice:agent] ${line}`);
       };
 
