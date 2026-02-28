@@ -1,0 +1,3 @@
+# Stimm core + default providers used by the default wizard profile.
+# The setup wizard installs additional extras on demand based on the user selection.
+stimm[deepgram,openai]
