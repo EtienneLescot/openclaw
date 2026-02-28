@@ -427,14 +427,15 @@ export class AgentProcess {
             } catch {
               // ignore — fall through to skip
             }
+            // Only match Stimm/LiveKit-specific identifiers — avoid generic
+            // "python" which would also catch unrelated local services.
             const isSafe =
-              cmdline.includes("python") ||
               cmdline.includes("livekit") ||
               cmdline.includes("stimm") ||
               cmdline.includes("agent.py");
             if (!isSafe) {
               logger.warn(
-                `[stimm-voice] Skipping kill of PID ${pid} on port ${port} — does not look like a Python/livekit-agents process.`,
+                `[stimm-voice] Skipping kill of PID ${pid} on port ${port} — does not look like a Stimm/livekit-agents process.`,
               );
               continue;
             }
