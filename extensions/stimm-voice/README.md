@@ -94,6 +94,33 @@ Notes:
 openclaw voice:start --channel web
 ```
 
+### Supervisor logs (high-level)
+
+Use this command to inspect supervisor observability quickly without manual `grep`:
+
+```bash
+openclaw voice:logs --limit 40
+```
+
+Interactive follow mode:
+
+```bash
+openclaw voice:logs --watch --interval 2
+```
+
+Options:
+
+- `--raw`: print raw `OBS_JSON` lines from `/tmp/stimm-agent.log`
+- `--limit <n>`: number of entries to print (default: `40`)
+- `--watch`: keep watching and print new entries continuously (Ctrl+C to stop)
+- `--interval <s>`: refresh interval for watch mode in seconds (default: `2`)
+- `--all-events`: include `inference_started` (hidden by default to reduce noise)
+
+The command prints two sections:
+
+- Stimm supervisor `OBS_JSON` events (`inference_started`, `inference_completed`, `trigger_sent`, `no_action`)
+- Gateway-side synthesized lines (`[stimm-voice:supervisor]`) when available
+
 `stimm.start` / `stimm_voice:start_session` returns:
 
 - room metadata

@@ -111,6 +111,7 @@ describe("registerStimmVoiceCli", () => {
     expect(prog.commands).toHaveProperty("voice:start");
     expect(prog.commands).toHaveProperty("voice:stop");
     expect(prog.commands).toHaveProperty("voice:status");
+    expect(prog.commands).toHaveProperty("voice:logs");
   });
 
   it("voice:start creates a session and logs info", async () => {
