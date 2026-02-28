@@ -24,7 +24,7 @@ import { registerStimmVoiceCli } from "./src/cli.js";
 import { resolveStimmVoiceConfig, type StimmVoiceConfig } from "./src/config.js";
 import type { CoreConfig } from "./src/core-bridge.js";
 import { startQuickTunnel, type QuickTunnelRuntime } from "./src/quick-tunnel.js";
-import { generateStimmResponse } from "./src/response-generator.js";
+import { generateStimmResponse, type StimmResponseResult } from "./src/response-generator.js";
 
 // ---------------------------------------------------------------------------
 // Tool schema — flat object, no Type.Union (per repo guardrails).
@@ -847,8 +847,23 @@ const stimmVoicePlugin = {
             api.logger.error(`[stimm-voice] Agent error: ${result.error}`);
           }
 
+          const supervisorText = normalizeSupervisorResponseText(result);
+          const supervisorDecision = safeParseSupervisorDecision(supervisorText);
+          const preview = truncateSupervisorLogText(
+            supervisorDecision?.text ?? (typeof result.text === "string" ? result.text : ""),
+            220,
+          );
+
+          api.logger.info(
+            `[stimm-voice:supervisor] room=${body.roomName} channel=${body.channel ?? "web"} ` +
+              `structured_json=${supervisorDecision ? "yes" : "no"} ` +
+              `action=${supervisorDecision?.action ?? "n/a"} ` +
+              `reason=${supervisorDecision?.reason ?? "n/a"} ` +
+              `text_preview="${preview || ""}"`,
+          );
+
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ text: result.text ?? "", error: result.error }));
+          res.end(JSON.stringify({ text: supervisorText, error: result.error }));
         } catch (err) {
           res.writeHead(500, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
@@ -1237,6 +1252,64 @@ function randomHex(bytes: number): string {
   const array = new Uint8Array(bytes);
   webcrypto.getRandomValues(array);
   return [...array].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function normalizeSupervisorResponseText(result: StimmResponseResult): string {
+  const raw = typeof result.text === "string" ? result.text.trim() : "";
+
+  // If the upstream model already returned structured JSON text, preserve it.
+  if (result.decision && raw.startsWith("{") && raw.endsWith("}")) {
+    return raw;
+  }
+
+  // Non-empty unstructured text should still be actionable for Stimm.
+  if (raw.length > 0) {
+    return JSON.stringify({
+      action: "TRIGGER",
+      text: raw,
+      reason: result.decision?.reason ?? "openclaw_non_json_fallback",
+    });
+  }
+
+  return JSON.stringify({
+    action: "NO_ACTION",
+    text: "",
+    reason: result.decision?.reason ?? result.error ?? "empty_response",
+  });
+}
+
+type NormalizedSupervisorDecision = {
+  action: "TRIGGER" | "NO_ACTION";
+  text: string;
+  reason: string;
+};
+
+function safeParseSupervisorDecision(raw: string): NormalizedSupervisorDecision | null {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return null;
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      action?: unknown;
+      text?: unknown;
+      reason?: unknown;
+    };
+    if (parsed.action !== "TRIGGER" && parsed.action !== "NO_ACTION") {
+      return null;
+    }
+    return {
+      action: parsed.action,
+      text: typeof parsed.text === "string" ? parsed.text : "",
+      reason: typeof parsed.reason === "string" ? parsed.reason : "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function truncateSupervisorLogText(value: string, maxLength: number): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength)}…`;
 }
 
 /** Serialize a VoiceSession for gateway/tool responses. */
