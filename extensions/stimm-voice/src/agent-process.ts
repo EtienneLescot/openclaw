@@ -215,6 +215,13 @@ export class AgentProcess {
       stdio: ["ignore", "pipe", "pipe"],
     });
 
+    // Handle asynchronous spawn failures (EACCES, bad interpreter, etc.)
+    // to avoid crashing the gateway with an unhandled 'error' event.
+    this.proc.on("error", (err) => {
+      logger.error(`[stimm-voice] Failed to start Python voice agent: ${err.message}`);
+      this.proc = null;
+    });
+
     const pid = this.proc.pid;
     const logFile = "/tmp/stimm-agent.log";
     logger.info(`[stimm-voice] Voice agent started (PID ${pid}) — Python logs also in ${logFile}`);
@@ -402,6 +409,31 @@ export class AgentProcess {
       if (result) {
         for (const pid of result.trim().split(/\s+/).filter(Boolean)) {
           try {
+            // Only kill the process if it looks like a Python/livekit-agents worker.
+            // This prevents accidentally killing unrelated services on the same port.
+            let cmdline = "";
+            try {
+              // Linux: /proc/<pid>/cmdline (null-byte separated)
+              cmdline = execSync(
+                `cat /proc/${pid}/cmdline 2>/dev/null || ps -p ${pid} -o args= 2>/dev/null`,
+                {
+                  encoding: "utf-8",
+                },
+              );
+            } catch {
+              // ignore — fall through to skip
+            }
+            const isSafe =
+              cmdline.includes("python") ||
+              cmdline.includes("livekit") ||
+              cmdline.includes("stimm") ||
+              cmdline.includes("agent.py");
+            if (!isSafe) {
+              logger.warn(
+                `[stimm-voice] Skipping kill of PID ${pid} on port ${port} — does not look like a Python/livekit-agents process.`,
+              );
+              continue;
+            }
             execSync(`kill -9 ${pid} 2>/dev/null`);
             logger.warn(`[stimm-voice] Killed zombie process PID ${pid} holding port ${port}`);
           } catch {
