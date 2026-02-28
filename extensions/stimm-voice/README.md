@@ -1,6 +1,6 @@
-# @openclaw/stimm-voice
+# openclaw-stimm-voice
 
-Stimm Voice is an OpenClaw extension for real-time voice conversations.
+Stimm Voice is a third-party OpenClaw plugin for real-time voice conversations.
 
 It uses a dual-agent architecture:
 
@@ -9,7 +9,7 @@ It uses a dual-agent architecture:
 
 ## Presentation
 
-What this extension provides:
+What this plugin provides:
 
 - Real-time voice sessions backed by LiveKit rooms.
 - Browser entrypoint at `web.path` (default: `/voice`).
@@ -23,17 +23,21 @@ What this extension provides:
 
 - Node.js 22+
 - Python 3.10+
-- OpenClaw gateway installed and working
+- OpenClaw gateway ≥ 2026.2.0 installed and running
 - LiveKit deployment:
   - local (`ws://localhost:7880`) or
   - cloud (`wss://<your-project>.livekit.cloud`)
 
-### Local install from this repo
+### Install from npm
 
 ```bash
-openclaw plugins install --link ./extensions/stimm-voice
-cd ./extensions/stimm-voice
-pnpm install
+openclaw plugins install openclaw-stimm-voice
+```
+
+### Install from GitHub (latest)
+
+```bash
+openclaw plugins install https://github.com/EtienneLescot/openclaw-stimm-voice
 ```
 
 Then restart the OpenClaw gateway.
