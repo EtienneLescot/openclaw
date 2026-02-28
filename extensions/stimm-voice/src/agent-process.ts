@@ -226,6 +226,10 @@ export class AgentProcess {
     const logFile = "/tmp/stimm-agent.log";
     logger.info(`[stimm-voice] Voice agent started (PID ${pid}) — Python logs also in ${logFile}`);
 
+    // Capture proc reference before the async import to avoid a race
+    // where the error handler sets this.proc = null before the .then() runs.
+    const procRef = this.proc;
+
     // Write Python logs to a dedicated file for easy grep/tail access.
     import("node:fs").then(({ createWriteStream }) => {
       const logStream = createWriteStream(logFile, { flags: "a" });
@@ -245,20 +249,20 @@ export class AgentProcess {
       };
 
       // Forward stdout/stderr through the plugin logger AND to the log file.
-      this.proc!.stdout?.on("data", (chunk: Buffer) => {
+      procRef.stdout?.on("data", (chunk: Buffer) => {
         for (const line of chunk.toString().split("\n").filter(Boolean)) {
           forwardLine(line);
         }
       });
 
-      this.proc!.stderr?.on("data", (chunk: Buffer) => {
+      procRef.stderr?.on("data", (chunk: Buffer) => {
         for (const line of chunk.toString().split("\n").filter(Boolean)) {
           // livekit-agents logs to stderr by default — forward as info.
           forwardLine(line);
         }
       });
 
-      this.proc!.on("exit", () => {
+      procRef.on("exit", () => {
         logStream.write(`--- stimm-agent PID ${pid} exited at ${new Date().toISOString()} ---\n`);
         logStream.end();
       });
