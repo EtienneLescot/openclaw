@@ -105,10 +105,10 @@ function getRequestIp(req: {
   socket?: { remoteAddress?: string | null };
   headers?: Record<string, unknown>;
 }): string {
-  const xff = req.headers?.["x-forwarded-for"];
-  if (typeof xff === "string" && xff.trim()) {
-    return xff.split(",")[0]?.trim() || "unknown";
-  }
+  // Use the socket's remote address for rate limiting — this is the actual
+  // connecting IP and cannot be spoofed by the client via headers.
+  // X-Forwarded-For is intentionally ignored here to prevent bypass via
+  // forged headers when the gateway is not behind a trusted proxy.
   return req.socket?.remoteAddress ?? "unknown";
 }
 
@@ -387,11 +387,9 @@ const stimmVoicePlugin = {
         return stored;
       }
 
-      // Stateless fallback: allow signed, unexpired claims created by another process.
-      parsed.usedAt = now;
-      claimStore.set(parsed.claimId, parsed);
-      consumedClaims.set(parsed.claimId, parsed.expiresAt);
-      return parsed;
+      // Claim not found in store — either never issued by this process or
+      // already purged by purgeClaimsForRoom (session ended). Reject.
+      return null;
     };
 
     const resolveDisconnectClaim = (
