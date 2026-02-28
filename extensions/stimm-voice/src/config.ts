@@ -43,6 +43,7 @@ export const TTS_PROVIDERS = [
   "aws",
   "playai",
   "rime",
+  "hume",
 ] as const;
 
 /** LLM providers supported by livekit-plugins-*. */
@@ -194,6 +195,7 @@ const PROVIDER_ENV_MAP: Record<string, string> = {
   sambanova: "SAMBANOVA_API_KEY",
   playai: "PLAYAI_API_KEY",
   rime: "RIME_API_KEY",
+  hume: "HUME_API_KEY",
   speechmatics: "SPEECHMATICS_API_KEY",
   clova: "CLOVA_API_KEY",
   fal: "FAL_KEY",

@@ -96,7 +96,8 @@
                   "azure",
                   "aws",
                   "playai",
-                  "rime"
+                  "rime",
+                  "hume"
                 ],
                 "default": "openai",
                 "description": "livekit-plugins-* TTS provider"
@@ -284,7 +285,7 @@
     },
     "voiceAgent.tts.provider": {
       "label": "TTS Provider",
-      "help": "Text-to-Speech provider: openai, elevenlabs, cartesia, google, azure, aws, playai, rime"
+      "help": "Text-to-Speech provider: openai, elevenlabs, cartesia, google, azure, aws, playai, rime, hume"
     },
     "voiceAgent.tts.model": {
       "label": "TTS Model",
