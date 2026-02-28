@@ -51,9 +51,9 @@ fi
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
 
-echo "→ Installing stimm in editable mode with dev extras..."
-pip install -q -e "$STIMM_REPO[deepgram,openai,dev]"
-echo "✓ Python venv ready ($(python --version), stimm editable)"
+echo "→ Installing Python dependencies from requirements.txt..."
+pip install -q -r "$EXT_DIR/python/requirements.txt"
+echo "✓ Python venv ready ($(python --version))"
 
 # ── 3) LiveKit via Docker ──────────────────────────────────────
 if [[ "$SKIP_DOCKER" == "false" ]]; then
@@ -77,11 +77,10 @@ echo "│                                                          │"
 echo "│  Quick start:                                            │"
 echo "│    # Terminal 1 — run voice agent:                       │"
 echo "│    source $VENV_DIR/bin/activate                         │"
-echo "│    cd $STIMM_REPO                                        │"
 echo "│    LIVEKIT_URL=ws://localhost:7880 \\                     │"
 echo "│    LIVEKIT_API_KEY=devkey \\                              │"
 echo "│    LIVEKIT_API_SECRET=secret \\                           │"
-echo "│    python -m livekit.agents dev python/agent.py          │"
+echo "│    python $EXT_DIR/python/agent.py dev                   │"
 echo "│                                                          │"
 echo "│    # Terminal 2 — run openclaw with stimm-voice:         │"
 echo "│    pnpm dev                                              │"
