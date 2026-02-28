@@ -507,16 +507,17 @@ const stimmVoicePlugin = {
       // ensureRuntime() throws when the plugin is disabled — check it first so
       // ensureAgentProcessStarted() never spawns a background process when disabled.
       const rt = await ensureRuntime();
+      // Validate the quick-tunnel (and its secret requirements) BEFORE creating
+      // the LiveKit session — so a tunnel error never leaves an orphaned room.
+      if (config.access.mode === "quick-tunnel") {
+        tunnelInfo = await ensureQuickTunnel();
+      }
       ensureAgentProcessStarted();
       const session = await rt.lk.createSession({
         roomName: params.roomName,
         originChannel: params.channel,
         ttlSeconds: config.access.livekitTokenTtlSeconds,
       });
-
-      if (config.access.mode === "quick-tunnel") {
-        tunnelInfo = await ensureQuickTunnel();
-      }
 
       const payload = sessionPayload(session, tunnelInfo);
       const now = Date.now();
