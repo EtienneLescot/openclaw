@@ -117,6 +117,8 @@ type SttEntry = {
   label: string;
   defaultModel: string;
   presets: string[];
+  /** Actual constructor parameter name (e.g. "model"). Defaults to "model". */
+  modelParam?: string;
   api: ProviderApiConf;
 };
 type TtsEntry = {
@@ -125,6 +127,8 @@ type TtsEntry = {
   defaultModel: string;
   defaultVoice: string;
   presets: string[];
+  /** Actual constructor parameter name (e.g. "model_version" for Hume). Defaults to "model". */
+  modelParam?: string;
   api: ProviderApiConf;
 };
 type LlmEntry = {
@@ -132,6 +136,8 @@ type LlmEntry = {
   label: string;
   defaultModel: string;
   presets: string[];
+  /** Actual constructor parameter name. Defaults to "model". */
+  modelParam?: string;
   api: ProviderApiConf;
 };
 
@@ -202,6 +208,11 @@ function normalizeProviderEntry(kind: ModelLane, value: unknown): SttEntry | Tts
       : {}),
   };
 
+  const modelParam =
+    typeof record.modelParam === "string" && record.modelParam.trim().length > 0
+      ? record.modelParam
+      : undefined;
+
   if (kind === "tts") {
     return {
       id,
@@ -212,6 +223,7 @@ function normalizeProviderEntry(kind: ModelLane, value: unknown): SttEntry | Tts
           ? record.defaultVoice
           : "default",
       presets,
+      ...(modelParam ? { modelParam } : {}),
       api,
     } satisfies TtsEntry;
   }
@@ -222,6 +234,7 @@ function normalizeProviderEntry(kind: ModelLane, value: unknown): SttEntry | Tts
       label,
       defaultModel,
       presets,
+      ...(modelParam ? { modelParam } : {}),
       api,
     } satisfies SttEntry;
   }
@@ -231,6 +244,7 @@ function normalizeProviderEntry(kind: ModelLane, value: unknown): SttEntry | Tts
     label,
     defaultModel,
     presets,
+    ...(modelParam ? { modelParam } : {}),
     api,
   } satisfies LlmEntry;
 }
@@ -792,8 +806,10 @@ async function promptModelWithChoices(params: {
   options: string[];
   initialValue: string;
   placeholder: string;
+  /** Human-readable param label, e.g. "model version" for Hume. Defaults to "model". */
+  modelParamLabel?: string;
 }): Promise<string | symbol> {
-  const { c, message, initialValue, placeholder } = params;
+  const { c, message, initialValue, placeholder, modelParamLabel = "model" } = params;
   const currentOptions = uniq(params.options);
   const formatModelLabel = (value: string): string => {
     if (value === "default") return "Use provider default";
@@ -803,7 +819,7 @@ async function promptModelWithChoices(params: {
     message,
     options: [
       ...currentOptions.map((value) => ({ value, label: formatModelLabel(value) })),
-      { value: "__custom__", label: "Custom model…" },
+      { value: "__custom__", label: `Custom ${modelParamLabel}…` },
     ],
     initialValue: currentOptions.includes(initialValue) ? initialValue : "__custom__",
   })) as string | symbol;
@@ -812,7 +828,7 @@ async function promptModelWithChoices(params: {
   if (modelChoice !== "__custom__") return modelChoice;
 
   return c.text({
-    message: "Custom model name",
+    message: `Custom ${modelParamLabel}`,
     initialValue,
     placeholder,
   }) as Promise<string | symbol>;
@@ -1067,14 +1083,16 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
       await c.log.warn(sttLiveCatalog.modelWarning);
     }
 
+    const sttModelParamLabel = (sttEntry.modelParam ?? "model").replaceAll("_", " ");
     const sttModelResult = await promptModelWithChoices({
       c,
       lane: "stt",
       provider: sttProvider,
-      message: `STT model for ${sttEntry.label}`,
+      message: `STT ${sttModelParamLabel} for ${sttEntry.label}`,
       options: uniq([...sttLiveCatalog.models, ...sttEntry.presets]),
       initialValue: existing.stt?.model ?? sttEntry.defaultModel,
       placeholder: sttEntry.defaultModel,
+      modelParamLabel: sttModelParamLabel,
     });
     if (isCancel(sttModelResult)) return c.outro("Setup cancelled.");
     sttModel = sttModelResult;
@@ -1190,14 +1208,16 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
       await c.log.warn(ttsLiveCatalog.modelWarning);
     }
 
+    const ttsModelParamLabel = (ttsEntry.modelParam ?? "model").replaceAll("_", " ");
     const ttsModelResult = await promptModelWithChoices({
       c,
       lane: "tts",
       provider: ttsProvider,
-      message: `TTS model for ${ttsEntry.label}`,
+      message: `TTS ${ttsModelParamLabel} for ${ttsEntry.label}`,
       options: uniq([...ttsLiveCatalog.models, ...ttsEntry.presets]),
       initialValue: existing.tts?.model ?? ttsEntry.defaultModel,
       placeholder: ttsEntry.defaultModel,
+      modelParamLabel: ttsModelParamLabel,
     });
     if (isCancel(ttsModelResult)) return c.outro("Setup cancelled.");
     ttsModel = ttsModelResult;
@@ -1334,14 +1354,16 @@ export async function runSetupWizard(deps: SetupWizardDeps): Promise<void> {
       await c.log.warn(llmLiveCatalog.modelWarning);
     }
 
+    const llmModelParamLabel = (llmEntry.modelParam ?? "model").replaceAll("_", " ");
     const llmModelResult = await promptModelWithChoices({
       c,
       lane: "llm",
       provider: llmProvider,
-      message: `LLM model for ${llmEntry.label}`,
+      message: `LLM ${llmModelParamLabel} for ${llmEntry.label}`,
       options: uniq([...llmLiveCatalog.models, ...llmEntry.presets]),
       initialValue: existing.llm?.model ?? llmEntry.defaultModel,
       placeholder: llmEntry.defaultModel,
+      modelParamLabel: llmModelParamLabel,
     });
     if (isCancel(llmModelResult)) return c.outro("Setup cancelled.");
     llmModel = llmModelResult;
