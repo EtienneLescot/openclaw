@@ -412,6 +412,14 @@ const stimmVoicePlugin = {
       return null;
     };
 
+    // Remove all pending and used claims associated with a room so that stale
+    // share links cannot be redeemed after a session is intentionally ended.
+    const purgeClaimsForRoom = (roomName: string): void => {
+      for (const [id, claim] of claimStore.entries()) {
+        if (claim.roomName === roomName) claimStore.delete(id);
+      }
+    };
+
     const enforceClaimRateLimit = (ip: string): boolean => {
       const now = Date.now();
       const windowStart = now - claimRateWindowMs;
@@ -539,6 +547,7 @@ const stimmVoicePlugin = {
           }
           const rt = await ensureRuntime();
           const ok = await rt.lk.endSession(room);
+          if (ok) purgeClaimsForRoom(room);
           respond(ok, ok ? { ended: true } : { error: "session not found" });
         } catch (err) {
           sendError(respond, err);
@@ -650,6 +659,7 @@ const stimmVoicePlugin = {
               if (!room) throw new Error("room required");
               const ok = await rt.lk.endSession(room);
               if (!ok) throw new Error("session not found");
+              purgeClaimsForRoom(room);
               return json({ ended: true, room });
             }
 
@@ -917,11 +927,13 @@ const stimmVoicePlugin = {
               // User disconnected — tear down the room immediately.
               api.logger.info(`[stimm-voice] User left room "${roomName}" — ending session.`);
               await lkRuntime.endSession(roomName);
+              purgeClaimsForRoom(roomName);
               await maybeShutdownVoiceStartProcess("webhook participant_left");
             } else if (event.event === "room_finished") {
               // All participants gone (Python agent also done) — clean up map.
               api.logger.info(`[stimm-voice] Room "${roomName}" finished — cleaning up session.`);
               await lkRuntime.endSession(roomName);
+              purgeClaimsForRoom(roomName);
               await maybeShutdownVoiceStartProcess("webhook room_finished");
             }
           }
