@@ -905,16 +905,23 @@ const stimmVoicePlugin = {
           for await (const chunk of req) chunks.push(chunk as Buffer);
           const body = Buffer.concat(chunks).toString("utf8");
 
-          // Verify LiveKit HMAC signature (skipAuth=false, uses api key+secret).
+          // Verify LiveKit HMAC signature — always required.
+          // If LiveKit is not configured to sign webhooks, reject early rather
+          // than accepting unsigned payloads (prevents unauthenticated DoS).
           const authHeader = req.headers["authorization"] ?? req.headers["Authorization"];
+          if (!authHeader) {
+            api.logger.warn(
+              "[stimm-voice] Webhook rejected: missing Authorization header. " +
+                "Configure LiveKit webhook signing with the same API key/secret.",
+            );
+            res.writeHead(401, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "missing_authorization" }));
+            return;
+          }
           const receiver = new WebhookReceiver(config.livekit.apiKey, config.livekit.apiSecret);
-          // skipAuth only if no Authorization header is present (local/dev without
-          // webhook signing configured on the server side).
-          const skipAuth = !authHeader;
           const event = await receiver.receive(
             body,
             typeof authHeader === "string" ? authHeader : undefined,
-            skipAuth,
           );
 
           const roomName = event.room?.name;
