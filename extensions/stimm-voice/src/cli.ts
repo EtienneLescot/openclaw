@@ -4,6 +4,7 @@
  * Exposes `openclaw voice [start|stop|status|setup]` commands.
  */
 
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import qrcode from "qrcode-terminal";
 import type { StimmVoiceConfig } from "./config.js";
 
@@ -23,12 +24,153 @@ type RoomManager = {
   listSessions: () => VoiceSession[];
 };
 
+type SupervisorObsEvent = {
+  component: string;
+  event: string;
+  inference_seq?: number;
+  latency_ms?: number;
+  structured_json?: boolean;
+  action?: string;
+  reason?: string;
+  text_chars?: number;
+};
+
+const supportsAnsi =
+  Boolean(process.stdout?.isTTY) &&
+  !Object.prototype.hasOwnProperty.call(process.env, "NO_COLOR") &&
+  process.env.FORCE_COLOR !== "0";
+
+function color(code: string, value: string): string {
+  if (!supportsAnsi) return value;
+  return `\u001b[${code}m${value}\u001b[0m`;
+}
+
+function heading(value: string): string {
+  return color("1;36", value);
+}
+
+function key(value: string): string {
+  return color("2", value);
+}
+
+function ok(value: string): string {
+  return color("32", value);
+}
+
+function warn(value: string): string {
+  return color("33", value);
+}
+
+function info(value: string): string {
+  return color("36", value);
+}
+
 function renderQrAscii(data: string): Promise<string> {
   return new Promise((resolve) => {
     qrcode.generate(data, { small: true }, (output: string) => {
       resolve(output.trimEnd());
     });
   });
+}
+
+function parseObsEventFromLine(line: string): SupervisorObsEvent | null {
+  const marker = "OBS_JSON ";
+  const markerIndex = line.indexOf(marker);
+  if (markerIndex === -1) return null;
+  const payload = line.slice(markerIndex + marker.length).trim();
+  try {
+    const parsed = JSON.parse(payload) as SupervisorObsEvent;
+    if (parsed.component !== "conversation_supervisor" || typeof parsed.event !== "string") {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function formatObsEvent(event: SupervisorObsEvent): string {
+  const seq = event.inference_seq ?? "?";
+  if (event.event === "inference_started") {
+    return `${heading(`[SUPERVISOR #${seq}]`)} ${info("inference_started")}`;
+  }
+  if (event.event === "inference_completed") {
+    const structured = event.structured_json ? ok("yes") : warn("no");
+    const reason = event.reason && event.reason.trim().length > 0 ? event.reason : "n/a";
+    return [
+      `${heading(`[SUPERVISOR #${seq}]`)} ${info("inference_completed")}`,
+      `  ${key("latency_ms")}: ${event.latency_ms ?? "?"}`,
+      `  ${key("structured_json")}: ${structured}`,
+      `  ${key("action")}: ${event.action ?? "n/a"}`,
+      `  ${key("reason")}: ${reason}`,
+    ].join("\n");
+  }
+  if (event.event === "trigger_sent") {
+    return [
+      `${heading(`[SUPERVISOR #${seq}]`)} ${ok("trigger_sent")}`,
+      `  ${key("text_chars")}: ${event.text_chars ?? "?"}`,
+    ].join("\n");
+  }
+  if (event.event === "no_action") {
+    return `${heading(`[SUPERVISOR #${seq}]`)} ${warn("no_action")}`;
+  }
+  return `${heading(`[SUPERVISOR #${seq}]`)} ${event.event}`;
+}
+
+function takeLast<T>(items: T[], limit: number): T[] {
+  return items.slice(Math.max(0, items.length - limit));
+}
+
+function resolveLatestGatewayLogFile(): string | null {
+  const dir = "/tmp/openclaw";
+  if (!existsSync(dir)) return null;
+  const files = readdirSync(dir)
+    .filter((name) => /^openclaw-\d{4}-\d{2}-\d{2}\.log$/.test(name))
+    .sort();
+  if (files.length === 0) return null;
+  return `${dir}/${files[files.length - 1]}`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function extractGatewayMessage(line: string): string {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("{")) return line;
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    const message = parsed["1"];
+    if (typeof message === "string") return message;
+  } catch {
+    /* ignore JSON parse errors */
+  }
+  return line;
+}
+
+function decodeHeavyEscapes(line: string): string {
+  const backslashCount = (line.match(/\\/g) ?? []).length;
+  if (backslashCount < 8) return line;
+  try {
+    return JSON.parse(`"${line.replace(/"/g, '\\"')}"`) as string;
+  } catch {
+    return line.replace(/\\\\/g, "\\");
+  }
+}
+
+function dedupeConsecutive(lines: string[]): string[] {
+  const result: string[] = [];
+  for (const line of lines) {
+    if (result.length === 0 || result[result.length - 1] !== line) {
+      result.push(line);
+    }
+  }
+  return result;
+}
+
+function shouldDisplayObsEvent(event: SupervisorObsEvent, includeStarted: boolean): boolean {
+  if (includeStarted) return true;
+  return event.event !== "inference_started";
 }
 
 interface VoiceCliDeps {
@@ -195,4 +337,146 @@ export function registerStimmVoiceCli(deps: VoiceCliDeps): void {
       logger.info("  ❌ Plugin: disabled — set stimm-voice.enabled=true");
     }
   });
+
+  const logs = program.command("voice:logs");
+  logs
+    .description("Show supervisor observability logs (OBS_JSON + gateway summary)")
+    .option("--limit <n>", "Number of entries to show", "40")
+    .option("--raw", "Show raw OBS_JSON lines from /tmp/stimm-agent.log")
+    .option("--all-events", "Include inference_started events (default hides them)")
+    .option("--watch", "Watch logs continuously (Ctrl+C to stop)")
+    .option("--interval <s>", "Watch refresh interval in seconds", "2")
+    .action(
+      async (opts: {
+        limit?: string;
+        raw?: boolean;
+        allEvents?: boolean;
+        watch?: boolean;
+        interval?: string;
+      }) => {
+        const limit = Math.max(1, Number.parseInt(opts.limit ?? "40", 10) || 40);
+        const intervalSeconds = Math.max(1, Number.parseInt(opts.interval ?? "2", 10) || 2);
+        const intervalMs = intervalSeconds * 1000;
+        const stimmLogFile = "/tmp/stimm-agent.log";
+
+        if (!existsSync(stimmLogFile)) {
+          logger.error("stimm log file not found: /tmp/stimm-agent.log");
+          return;
+        }
+
+        const printSnapshot = (
+          onlyNew: boolean,
+          previousObsCount = 0,
+          previousGatewayCount = 0,
+        ) => {
+          const stimmLines = readFileSync(stimmLogFile, "utf8").split(/\r?\n/);
+          const obsLines = stimmLines.filter((line) => line.includes("OBS_JSON "));
+          const obsSlice = onlyNew ? obsLines.slice(previousObsCount) : takeLast(obsLines, limit);
+
+          if (!onlyNew) {
+            logger.info(heading(`Supervisor OBS source: ${stimmLogFile}`));
+          }
+          if (obsLines.length === 0) {
+            if (!onlyNew) logger.info("No OBS_JSON lines found yet.");
+          } else if (obsSlice.length === 0 && onlyNew) {
+            // Stay silent during watch when nothing new happened.
+          } else if (opts.raw) {
+            for (const line of dedupeConsecutive(obsSlice).map((entry) =>
+              decodeHeavyEscapes(entry),
+            )) {
+              logger.info(line);
+            }
+          } else {
+            const events = obsSlice
+              .map((line) => parseObsEventFromLine(line))
+              .filter((event): event is SupervisorObsEvent => Boolean(event))
+              .filter((event) => shouldDisplayObsEvent(event, Boolean(opts.allEvents)));
+            if (events.length === 0) {
+              if (!onlyNew) {
+                logger.info(key("No parseable OBS_JSON events."));
+              }
+            } else {
+              for (const event of events) {
+                logger.info(formatObsEvent(event));
+              }
+            }
+          }
+
+          const gatewayLogFile = resolveLatestGatewayLogFile();
+          if (!gatewayLogFile || !existsSync(gatewayLogFile)) {
+            logger.info("Gateway log file not found under /tmp/openclaw.");
+            return {
+              obsCount: obsLines.length,
+              gatewayCount: 0,
+              gatewayPath: null as string | null,
+            };
+          }
+
+          const gatewayLines = readFileSync(gatewayLogFile, "utf8")
+            .split(/\r?\n/)
+            .map((line) => extractGatewayMessage(line))
+            .filter((line) => line.includes("[stimm-voice:supervisor]"));
+          const gatewaySlice = onlyNew
+            ? gatewayLines.slice(previousGatewayCount)
+            : takeLast(gatewayLines, limit);
+
+          if (!onlyNew) {
+            logger.info(heading(`Gateway supervisor source: ${gatewayLogFile}`));
+          }
+          if (gatewayLines.length === 0) {
+            if (!onlyNew) logger.info("No [stimm-voice:supervisor] lines found yet.");
+          } else if (gatewaySlice.length === 0 && onlyNew) {
+            // Stay silent during watch when nothing new happened.
+          } else {
+            for (const line of dedupeConsecutive(gatewaySlice).map((entry) =>
+              decodeHeavyEscapes(entry),
+            )) {
+              logger.info(line);
+            }
+          }
+
+          return {
+            obsCount: obsLines.length,
+            gatewayCount: gatewayLines.length,
+            gatewayPath: gatewayLogFile,
+          };
+        };
+
+        const firstSnapshot = printSnapshot(false);
+
+        if (!opts.watch) {
+          return;
+        }
+
+        logger.info(info(`Watching logs every ${intervalSeconds}s. Press Ctrl+C to stop.`));
+
+        let running = true;
+        let obsCount = firstSnapshot.obsCount;
+        let gatewayCount = firstSnapshot.gatewayCount;
+        let gatewayPath = firstSnapshot.gatewayPath;
+
+        const stop = () => {
+          running = false;
+        };
+        process.once("SIGINT", stop);
+        process.once("SIGTERM", stop);
+
+        try {
+          while (running) {
+            await sleep(intervalMs);
+            if (!running) break;
+
+            const latestGatewayPath = resolveLatestGatewayLogFile();
+            const gatewayRotated = latestGatewayPath !== gatewayPath;
+            const snapshot = printSnapshot(true, obsCount, gatewayRotated ? 0 : gatewayCount);
+            obsCount = snapshot.obsCount;
+            gatewayCount = snapshot.gatewayCount;
+            gatewayPath = snapshot.gatewayPath;
+          }
+        } finally {
+          process.off("SIGINT", stop);
+          process.off("SIGTERM", stop);
+        }
+      },
+    );
 }
